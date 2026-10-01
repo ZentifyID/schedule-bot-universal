@@ -144,7 +144,3 @@ class TelegramAPI:
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self.request("answerCallbackQuery", callback_query_id=callback_id, text=text)
-
-    def get_chat_member(self, chat_id: int, user_id: int) -> dict[str, Any]:
-        result = self.request("getChatMember", chat_id=chat_id, user_id=user_id)
-        return dict(result or {})

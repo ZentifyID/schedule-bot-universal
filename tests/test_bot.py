@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import tempfile
 import unittest
 from concurrent.futures import Future
@@ -12,14 +13,6 @@ from app.config import Config
 
 
 class FakeTelegram:
-    def __init__(self, status: str = "member"):
-        self.status = status
-        self.member_calls = 0
-
-    def get_chat_member(self, chat_id: int, user_id: int) -> dict[str, str]:
-        self.member_calls += 1
-        return {"status": self.status}
-
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         return None
 
@@ -34,7 +27,7 @@ class FakeSender:
         self.messages.append(text)
 
 
-class BotPermissionTests(unittest.TestCase):
+class BotTests(unittest.TestCase):
     def test_submission_filters_spam_and_releases_failed_requests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
@@ -156,35 +149,86 @@ class BotPermissionTests(unittest.TestCase):
         )
         return Bot(config)
 
-    def test_private_owner_can_manage(self) -> None:
+    def test_group_member_can_set_group_and_toggle_autopost_in_topic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             try:
-                bot.telegram = FakeTelegram()
-                self.assertTrue(
-                    bot.handlers.can_manage(
-                        {"id": 42, "type": "private"},
-                        {"id": 42},
-                    )
+                telegram = MagicMock()
+                sender = FakeSender()
+                bot.handlers.telegram = telegram
+                bot.handlers.sender = sender
+                bot.handlers.schedules.groups = MagicMock(return_value=["11 ис"])
+                message = {
+                    "chat": {"id": -1001, "type": "supergroup"},
+                    "from": {"id": 7},
+                    "message_thread_id": 10,
+                }
+                bot.handlers.handle_message({**message, "text": "/setup"})
+                self.assertIn("Выбери группу", sender.messages[-1])
+                bot.handlers.handle_callback(
+                    {
+                        "id": "group",
+                        "data": "group:11 ис",
+                        "message": message,
+                        "from": {"id": 7},
+                    }
                 )
+                self.assertEqual(
+                    bot.storage.get_binding(-1001, 10)["target_name"], "11 ис"
+                )
+                bot.handlers.handle_message({**message, "text": "/autopost_on"})
+                self.assertEqual(bot.storage.get_binding(-1001, 10)["autopost"], 1)
+                bot.handlers.handle_message({**message, "text": "/autopost_off"})
+                self.assertEqual(bot.storage.get_binding(-1001, 10)["autopost"], 0)
+                self.assertIsNone(bot.storage.get_binding(-1001, None))
+                telegram.get_chat_member.assert_not_called()
             finally:
                 bot.close()
 
-    def test_group_requires_admin_and_caches_result(self) -> None:
+    def test_group_member_can_select_teacher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)
             try:
-                fake = FakeTelegram("administrator")
-                bot.telegram = fake
-                bot.handlers.telegram = fake
-                chat = {"id": -1001, "type": "supergroup"}
-                user = {"id": 7}
-                self.assertTrue(bot.handlers.can_manage(chat, user))
-                self.assertTrue(bot.handlers.can_manage(chat, user))
-                self.assertEqual(fake.member_calls, 1)
-                bot.handlers.admin_cache.clear()
-                fake.status = "member"
-                self.assertFalse(bot.handlers.can_manage(chat, user))
+                telegram = MagicMock()
+                bot.handlers.telegram = telegram
+                bot.handlers.sender = FakeSender()
+                teacher = "Иванова И.И."
+                bot.handlers._teachers = MagicMock(return_value=[teacher])
+                message = {"chat": {"id": -1001, "type": "group"}, "from": {"id": 7}}
+                token = hashlib.sha256("ивановаии".encode()).hexdigest()[:16]
+                for data in ("setup:teacher", "teacher:" + token):
+                    bot.handlers.handle_callback(
+                        {
+                            "id": data,
+                            "data": data,
+                            "message": message,
+                            "from": {"id": 7},
+                        }
+                    )
+                binding = bot.storage.get_binding(-1001, None)
+                self.assertEqual(binding["target_type"], "teacher")
+                self.assertEqual(binding["target_name"], teacher)
+                telegram.get_chat_member.assert_not_called()
+            finally:
+                bot.close()
+
+    def test_status_is_ignored_and_removed_from_help(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(directory)
+            try:
+                sender = FakeSender()
+                bot.handlers.sender = sender
+                message = {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}}
+                for text in ("/status", "/status@ExampleBot"):
+                    bot.handlers.handle_message({**message, "text": text})
+                    with patch.object(bot.executor, "submit") as submit:
+                        bot._submit_update({"message": {**message, "text": text}})
+                        submit.assert_not_called()
+                self.assertEqual(sender.messages, [])
+                bot.handlers.handle_message({**message, "text": "/help"})
+                self.assertNotIn("/status", sender.messages[-1])
+                self.assertIn("любой участник", sender.messages[-1])
+                self.assertNotIn("администратор", sender.messages[-1])
             finally:
                 bot.close()
 

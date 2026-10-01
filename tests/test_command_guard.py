@@ -19,7 +19,7 @@ def message(text: str, user: int = 1, chat: int = 1, thread: int = 0) -> dict:
 class CommandGuardTests(unittest.TestCase):
     def test_burst_refills_and_users_are_independent(self) -> None:
         guard = CommandGuard()
-        for command in ("/help", "/status", "/setup"):
+        for command in ("/help", "/start", "/setup"):
             key = guard.admit(message(command), 0)
             self.assertIsNotNone(key)
             guard.finish(key)
@@ -76,6 +76,8 @@ class CommandGuardTests(unittest.TestCase):
             "/refresh force",
             "/teacher Иванова",
             "/unknown",
+            "/status",
+            "/status@ExampleBot",
         ):
             self.assertIsNone(guard.admit(message(text), 0))
         key = guard.admit(message("/help"), 0)

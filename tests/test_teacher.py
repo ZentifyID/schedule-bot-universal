@@ -309,7 +309,6 @@ class TeacherIntegrationTests(unittest.TestCase):
                 sender=sender,
                 timezone=dt.timezone.utc,
                 validate_semester=lambda: None,
-                status_text=lambda: "status",
             )
             message = {
                 "chat": {"id": 1, "type": "private"},
@@ -347,7 +346,6 @@ class TeacherIntegrationTests(unittest.TestCase):
                 sender=sender,
                 timezone=dt.timezone.utc,
                 validate_semester=lambda: None,
-                status_text=lambda: "status",
             )
             message = {"chat": {"id": 1, "type": "private"}, "from": {"id": 1}}
             handlers.handle_message({**message, "text": "/teacher Иванова"})
@@ -393,7 +391,6 @@ class TeacherIntegrationTests(unittest.TestCase):
                 sender=sender,
                 timezone=dt.timezone.utc,
                 validate_semester=lambda: None,
-                status_text=lambda: "status",
             )
             message = {"chat": {"id": 1, "type": "private"}, "from": {"id": 1}}
             handlers.handle_callback(
@@ -436,7 +433,6 @@ class TeacherIntegrationTests(unittest.TestCase):
                 sender=sender,
                 timezone=dt.timezone.utc,
                 validate_semester=lambda: None,
-                status_text=lambda: "status",
             )
             message = {"chat": {"id": 1, "type": "private"}, "from": {"id": 1}}
             for token in ("setup:teacher", "teachers:1", "teacher:0000000000000000"):

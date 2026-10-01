@@ -75,7 +75,6 @@ class Bot:
             sender=self.sender,
             timezone=self.timezone,
             validate_semester=self._validate_semester_config,
-            status_text=self._status_text,
         )
         self.autopost = AutopostService(
             config=config,
@@ -138,20 +137,6 @@ class Bot:
             raise ValueError(
                 f"NUMERATOR_WEEK_START={week_start} does not match PDF semester {semester}"
             )
-
-    def _status_text(self) -> str:
-        cache = self.schedules.cache
-        generated = html.escape(str(cache.get("generated_at", "?")))
-        semester = html.escape(str(cache.get("semester_key", "?")))
-        return (
-            "<b>Состояние расписания</b>\n"
-            f"Семестр: <code>{semester}</code>\n"
-            f"Групп: {len(self.schedules.groups())}\n"
-            f"Кэш сформирован: <code>{generated}</code>\n"
-            f"Версия парсера: {cache.get('parser_version', '?')}\n"
-            f"Предупреждений парсера: {cache.get('parser_warnings', '?')}\n"
-            f"Понедельник числителя: <code>{self.config.numerator_week_start}</code>"
-        )
 
     def _refresh_task(self) -> None:
         try:

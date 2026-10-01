@@ -151,7 +151,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_week_output_uses_one_snapshot_for_all_days_and_week_types(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            bot = bot_tests.BotPermissionTests().make_bot(directory)
+            bot = bot_tests.BotTests().make_bot(directory)
             try:
                 bot.storage.set_binding(42, None, "11 ис")
                 bot.handlers.validate_semester = lambda: None

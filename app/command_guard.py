@@ -9,7 +9,6 @@ COMMANDS = {
     "/setup",
     "/group",
     "/groups",
-    "/status",
     "/today",
     "/tomorrow",
     "/date",

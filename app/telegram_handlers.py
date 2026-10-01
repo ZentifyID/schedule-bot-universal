@@ -4,7 +4,6 @@ import datetime as dt
 import hashlib
 import html
 import logging
-import time
 from collections.abc import Callable
 from typing import Any
 
@@ -70,7 +69,6 @@ class TelegramHandlers:
         sender: TelegramSendQueue,
         timezone: dt.tzinfo,
         validate_semester: Callable[[], None],
-        status_text: Callable[[], str],
     ) -> None:
         self.config = config
         self.storage = storage
@@ -80,32 +78,6 @@ class TelegramHandlers:
         self.sender = sender
         self.timezone = timezone
         self.validate_semester = validate_semester
-        self.status_text = status_text
-        self.admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
-
-    def can_manage(self, chat: dict[str, Any], user: dict[str, Any]) -> bool:
-        chat_id = int(chat.get("id", 0))
-        user_id = int(user.get("id", 0))
-        if not chat_id or not user_id:
-            return False
-        if str(chat.get("type", "")) == "private":
-            return chat_id == user_id
-        key = (chat_id, user_id)
-        now = time.time()
-        cached = self.admin_cache.get(key)
-        if cached and now - cached[1] < 300:
-            return cached[0]
-        member = self.telegram.get_chat_member(chat_id, user_id)
-        allowed = str(member.get("status", "")) in {"administrator", "creator"}
-        self.admin_cache[key] = (allowed, now)
-        return allowed
-
-    def _deny_management(self, chat_id: int, thread_id: int | None) -> None:
-        self.sender.send_message(
-            chat_id,
-            "Менять группу или преподавателя и автоотправку могут только администраторы чата.",
-            thread_id,
-        )
 
     def _binding_group(self, chat_id: int, thread_id: int | None) -> str | None:
         row = self.storage.get_binding(chat_id, thread_id)
@@ -260,7 +232,6 @@ class TelegramHandlers:
 
     def handle_message(self, message: dict[str, Any]) -> None:
         chat = message.get("chat") or {}
-        user = message.get("from") or {}
         if "id" not in chat:
             return
         chat_id = int(chat["id"])
@@ -284,28 +255,21 @@ class TelegramHandlers:
                 "/week — основное расписание без замен: оба варианта недели, "
                 "по сообщению на день. Ч — числитель, З — знаменатель; "
                 "суббота показывается при наличии пар.\n\n"
-                "<b>Настройки и состояние</b>\n"
+                "<b>Настройки</b>\n"
                 "/autopost_on — присылать расписание на завтра после появления "
                 "файла замен, даже если для выбранной группы или преподавателя замен нет. "
                 "Повторно — только при изменении итогового расписания.\n"
                 "/autopost_off — отключить автоотправку.\n"
-                "/status — сведения о загруженном расписании и кэше.\n"
                 "/help — эта справка.\n\n"
-                "Настройки действуют в текущем чате или теме. В групповых чатах "
-                "менять их могут администраторы. Расписание обновляется автоматически.\n"
+                "Настройки действуют в текущем чате или теме. "
+                "Менять их может любой участник. Расписание обновляется автоматически.\n"
                 "Частые повторы команд пропускаются. Дождитесь завершения ответа "
                 "перед повторным запросом.",
                 thread_id,
             )
             if command == "/help":
                 return
-        if command == "/status":
-            self.sender.send_message(chat_id, self.status_text(), thread_id)
-            return
         if command in {"/start", "/setup", "/group", "/groups"}:
-            if not self.can_manage(chat, user):
-                self._deny_management(chat_id, thread_id)
-                return
             self._send_setup(chat_id, thread_id)
             return
         binding = self.storage.get_binding(chat_id, thread_id)
@@ -370,9 +334,6 @@ class TelegramHandlers:
                     thread_id,
                 )
         elif command == "/autopost_on":
-            if not self.can_manage(chat, user):
-                self._deny_management(chat_id, thread_id)
-                return
             self.storage.set_autopost(chat_id, thread_id, True)
             self.sender.send_message(
                 chat_id,
@@ -380,9 +341,6 @@ class TelegramHandlers:
                 thread_id,
             )
         elif command == "/autopost_off":
-            if not self.can_manage(chat, user):
-                self._deny_management(chat_id, thread_id)
-                return
             self.storage.set_autopost(chat_id, thread_id, False)
             self.sender.send_message(chat_id, "Автоотправка выключена.", thread_id)
 
@@ -397,14 +355,9 @@ class TelegramHandlers:
         if "id" not in chat:
             return
         chat_id = int(chat["id"])
-        user = callback.get("from") or {}
         thread_id = message.get("message_thread_id")
         message_id = message.get("message_id")
         data = str(callback.get("data", ""))
-
-        if not self.can_manage(chat, user):
-            self._deny_management(chat_id, thread_id)
-            return
 
         if data == "setup:teacher":
             self._send_teacher_page(chat_id, thread_id, message_id, 0)
