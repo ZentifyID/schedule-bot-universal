@@ -280,6 +280,9 @@ class BotPermissionTests(unittest.TestCase):
                 bot.handlers.schedules.schedule_for = MagicMock(
                     side_effect=fake_schedule
                 )
+                bot.handlers.schedules.snapshot = MagicMock(
+                    return_value=bot.handlers.schedules
+                )
                 bot.handlers.replacements.apply_for_date = MagicMock()
                 message = {
                     "chat": {"id": 42, "type": "private"},

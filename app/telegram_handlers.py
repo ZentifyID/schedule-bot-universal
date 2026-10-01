@@ -17,7 +17,7 @@ from .schedule_formatter import (
     format_teacher_weekday_schedule,
     format_weekday_schedule,
 )
-from .schedule_service import ScheduleRepository, parse_flexible_date
+from .schedule_service import ScheduleRepository, ScheduleSnapshot, parse_flexible_date
 from .storage import Storage
 from .teacher_schedule import (
     available_teachers,
@@ -198,8 +198,10 @@ class TelegramHandlers:
         *,
         target_type: str = "group",
         include_replacements: bool = True,
+        snapshot: ScheduleSnapshot | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         self.validate_semester()
+        schedules = snapshot if snapshot is not None else self.schedules
         if target_type == "teacher":
             item = (
                 self.replacements.find_for_date(target_date)
@@ -208,7 +210,7 @@ class TelegramHandlers:
             )
             by_group = self.replacements.replacements_for_item(item) if item else None
             schedule = schedule_for_teacher(
-                self.schedules,
+                schedules,
                 name,
                 target_date,
                 self.config.numerator_week_start,
@@ -220,7 +222,7 @@ class TelegramHandlers:
                 else None
             )
             return schedule, note
-        base = self.schedules.schedule_for(
+        base = schedules.schedule_for(
             name, target_date, self.config.numerator_week_start
         )
         if not include_replacements:
@@ -337,18 +339,21 @@ class TelegramHandlers:
         elif command == "/week":
             monday = now.date() - dt.timedelta(days=now.weekday())
             self.validate_semester()
+            snapshot = self.schedules.snapshot()
             for day_offset in range(6):
                 first, _ = self._schedule(
                     name,
                     monday + dt.timedelta(days=day_offset),
                     target_type=target_type,
                     include_replacements=False,
+                    snapshot=snapshot,
                 )
                 second, _ = self._schedule(
                     name,
                     monday + dt.timedelta(days=day_offset + 7),
                     target_type=target_type,
                     include_replacements=False,
+                    snapshot=snapshot,
                 )
                 schedules = {first["week_type"]: first, second["week_type"]: second}
                 numerator_pairs = schedules["числитель"]["pairs"]

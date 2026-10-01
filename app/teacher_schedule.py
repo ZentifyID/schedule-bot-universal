@@ -6,7 +6,12 @@ from typing import Any
 
 from .pdf_parser import PAIR_TIMES_DISPLAY
 from .replacement_service import _pair_number, _replacement_lesson, apply_replacements
-from .schedule_service import WEEKDAYS_BY_NUMBER, ScheduleRepository, week_type_for_date
+from .schedule_service import (
+    WEEKDAYS_BY_NUMBER,
+    ScheduleRepository,
+    ScheduleSnapshot,
+    week_type_for_date,
+)
 
 _ZYBINA_PDF_TYPO = re.compile(r"\bЗыбина\s+О\.\s*Ю\.", re.IGNORECASE)
 
@@ -46,12 +51,13 @@ def available_teachers(schedules: ScheduleRepository) -> list[str]:
 
 
 def schedule_for_teacher(
-    schedules: ScheduleRepository,
+    schedules: ScheduleRepository | ScheduleSnapshot,
     teacher: str,
     target_date: dt.date,
     numerator_week_start: dt.date,
     replacements_by_group: dict[str, list[dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
+    schedules = schedules.snapshot()
     active: list[dict[str, Any]] = []
     changes: list[dict[str, Any]] = []
     for group in schedules.groups():

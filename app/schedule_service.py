@@ -81,7 +81,54 @@ def _validated_pdf(content: bytes, name: str) -> bytes:
     return content
 
 
-class ScheduleRepository:
+class ScheduleSnapshot:
+    """One independent cache version for the entire calculation."""
+
+    def __init__(self, cache: dict[str, Any]):
+        self._cache = copy.deepcopy(cache)
+
+    @property
+    def cache(self) -> dict[str, Any]:
+        return self._cache
+
+    def snapshot(self) -> ScheduleSnapshot:
+        return self
+
+    def groups(self, course: int | None = None) -> list[str]:
+        groups = self.cache.get("groups", {})
+        values = [
+            group
+            for group, payload in groups.items()
+            if course is None or int(payload.get("course", 0)) == course
+        ]
+        return sorted(values, key=lambda value: (int(value[:2]), value.casefold()))
+
+    def schedule_for(
+        self, group: str, target_date: dt.date, numerator_week_start: dt.date
+    ) -> dict[str, Any]:
+        canonical = normalize_group(group)
+        group_data = self.cache.get("groups", {}).get(canonical)
+        if not group_data:
+            raise KeyError(f"Группа {group} не найдена")
+        weekday = WEEKDAYS_BY_NUMBER[target_date.weekday()]
+        week_type = week_type_for_date(target_date, numerator_week_start)
+        lessons: list[dict[str, Any]] = []
+        if weekday in WEEKDAYS:
+            lessons = copy.deepcopy(
+                group_data["days"].get(weekday, {}).get(week_type, [])
+            )
+        return {
+            "group": canonical,
+            "date": target_date.isoformat(),
+            "weekday": weekday,
+            "week_type": week_type,
+            "pairs": lessons,
+            "replacements_count": 0,
+            "source": "pdf",
+        }
+
+
+class ScheduleRepository(ScheduleSnapshot):
     def __init__(self, storage: Storage, public_url: str):
         self.storage = storage
         self.public_url = public_url
@@ -98,14 +145,8 @@ class ScheduleRepository:
     def has_cache(self) -> bool:
         return self._cache is not None
 
-    def groups(self, course: int | None = None) -> list[str]:
-        groups = self.cache.get("groups", {})
-        values = [
-            group
-            for group, payload in groups.items()
-            if course is None or int(payload.get("course", 0)) == course
-        ]
-        return sorted(values, key=lambda value: (int(value[:2]), value.casefold()))
+    def snapshot(self) -> ScheduleSnapshot:
+        return ScheduleSnapshot(self.cache)
 
     def refresh(
         self, force: bool = False, expected_semester: str | None = None
@@ -204,27 +245,3 @@ class ScheduleRepository:
             )
         finally:
             self._lock.release()
-
-    def schedule_for(
-        self, group: str, target_date: dt.date, numerator_week_start: dt.date
-    ) -> dict[str, Any]:
-        canonical = normalize_group(group)
-        group_data = self.cache.get("groups", {}).get(canonical)
-        if not group_data:
-            raise KeyError(f"Группа {group} не найдена")
-        weekday = WEEKDAYS_BY_NUMBER[target_date.weekday()]
-        week_type = week_type_for_date(target_date, numerator_week_start)
-        lessons: list[dict[str, Any]] = []
-        if weekday in WEEKDAYS:
-            lessons = copy.deepcopy(
-                group_data["days"].get(weekday, {}).get(week_type, [])
-            )
-        return {
-            "group": canonical,
-            "date": target_date.isoformat(),
-            "weekday": weekday,
-            "week_type": week_type,
-            "pairs": lessons,
-            "replacements_count": 0,
-            "source": "pdf",
-        }

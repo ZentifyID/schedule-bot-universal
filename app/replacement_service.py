@@ -89,15 +89,43 @@ def _replacement_lesson(value: str) -> tuple[str, str]:
     return match.group(1).strip(), match.group(2).strip()
 
 
+class ReplacementConflictError(ValueError):
+    """Keep ambiguous source rows available instead of choosing one silently."""
+
+    def __init__(self, group: str, pair: int, rows: list[dict[str, str]]):
+        self.rows = copy.deepcopy(rows)
+        super().__init__(
+            f"В файле замен несколько разных записей для группы {group}, пары {pair}. "
+            "Проверьте исходный DOCX: однозначно применить замены нельзя."
+        )
+
+
+def _replacements_by_pair(
+    replacements: list[dict[str, str]], group: str
+) -> dict[int, dict[str, str]]:
+    by_pair: dict[int, dict[str, str]] = {}
+    for item in replacements:
+        pair = _pair_number(item.get("pair", ""))
+        if pair is None:
+            continue
+        previous = by_pair.get(pair)
+        if previous is not None and any(
+            previous.get(field, "").strip() != item.get(field, "").strip()
+            for field in ("from", "to", "room")
+        ):
+            rows = [
+                row for row in replacements if _pair_number(row.get("pair", "")) == pair
+            ]
+            raise ReplacementConflictError(group, pair, rows)
+        by_pair.setdefault(pair, item)
+    return by_pair
+
+
 def apply_replacements(
     schedule: dict[str, Any], replacements: list[dict[str, str]]
 ) -> dict[str, Any]:
     result = copy.deepcopy(schedule)
-    by_pair = {
-        pair: item
-        for item in replacements
-        if (pair := _pair_number(item.get("pair", ""))) is not None
-    }
+    by_pair = _replacements_by_pair(replacements, str(schedule.get("group", "?")))
     found: set[int] = set()
     for lesson in result["pairs"]:
         pair = int(lesson["pair"])

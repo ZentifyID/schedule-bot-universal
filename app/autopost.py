@@ -13,6 +13,7 @@ from .schedule_formatter import format_schedule, format_teacher_schedule
 from .schedule_service import ScheduleRepository
 from .storage import Storage
 from .teacher_schedule import schedule_for_teacher
+from .telegram_api import TelegramAPIError
 from .telegram_queue import TelegramSendQueue
 from .yandex_disk import file_fingerprint
 
@@ -136,9 +137,11 @@ class AutopostService:
                 date_key,
             )
         except Exception as error:
-            disabled = self.storage.record_autopost_failure(
-                chat_id, thread_id, str(error)
-            )
+            disabled = False
+            if isinstance(error, TelegramAPIError) and error.delivery_unavailable:
+                disabled = self.storage.record_autopost_failure(
+                    chat_id, thread_id, str(error)
+                )
             logger.exception(
                 "Autopost failed chat_id=%s thread_id=%s target=%s:%s disabled=%s",
                 chat_id,
