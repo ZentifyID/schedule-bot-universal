@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import http.client
 import tempfile
 import unittest
+import urllib.error
 from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.bot import Bot
 from app.config import Config
+from app.telegram_api import TelegramAPIError, TelegramRateLimitError
 
 
 class FakeTelegram:
@@ -209,6 +212,83 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(binding["target_type"], "teacher")
                 self.assertEqual(binding["target_name"], teacher)
                 telegram.get_chat_member.assert_not_called()
+            finally:
+                bot.close()
+
+    def test_setup_continues_when_callback_acknowledgement_fails(self) -> None:
+        def click(bot: Bot, message: dict, data: str) -> None:
+            with self.assertLogs("app.telegram_handlers", level="WARNING"):
+                bot.handlers.handle_callback(
+                    {"id": "callback", "data": data, "message": message}
+                )
+
+        errors = [
+            TelegramAPIError(
+                "answerCallbackQuery", 400, "Bad Request: query is too old"
+            ),
+            TimeoutError("The read operation timed out"),
+            urllib.error.URLError("Temporary failure in name resolution"),
+            http.client.RemoteDisconnected("Remote end closed connection"),
+            TelegramRateLimitError("answerCallbackQuery", 30),
+            TelegramAPIError("answerCallbackQuery", 502, "Bad Gateway"),
+        ]
+        for error in errors:
+            with (
+                self.subTest(error=type(error).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                bot = self.make_bot(directory)
+                try:
+                    bot.handlers.telegram = MagicMock()
+                    bot.handlers.telegram.answer_callback.side_effect = error
+                    bot.handlers.sender = MagicMock()
+                    bot.handlers.schedules.groups = MagicMock(return_value=["11 ис"])
+                    teacher = "Иванова И.И."
+                    bot.handlers._teachers = MagicMock(return_value=[teacher])
+                    token = hashlib.sha256("ивановаии".encode()).hexdigest()[:16]
+                    message = {
+                        "chat": {"id": -1001, "type": "supergroup"},
+                        "message_thread_id": 10,
+                        "message_id": 20,
+                    }
+
+                    for data in ("setup:groups", "course:1", "group:11 ис"):
+                        click(bot, message, data)
+                    binding = bot.storage.get_binding(-1001, 10)
+                    self.assertEqual(binding["target_type"], "group")
+                    self.assertEqual(binding["target_name"], "11 ис")
+                    for data in ("setup:teacher", "teachers:0", "teacher:" + token):
+                        click(bot, message, data)
+                    binding = bot.storage.get_binding(-1001, 10)
+                    self.assertEqual(binding["target_type"], "teacher")
+                    self.assertEqual(binding["target_name"], teacher)
+                    self.assertEqual(bot.handlers.sender.edit_message.call_count, 4)
+                    self.assertEqual(bot.handlers.sender.send_message.call_count, 2)
+                    self.assertIsNone(bot.storage.get_binding(-1001, None))
+                finally:
+                    bot.close()
+
+    def test_setup_delivery_error_is_not_suppressed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(directory)
+            try:
+                bot.handlers.telegram = MagicMock()
+                bot.handlers.telegram.answer_callback.side_effect = TimeoutError()
+                bot.handlers.sender = MagicMock()
+                error = TelegramAPIError("editMessageText", 400, "message not found")
+                bot.handlers.sender.edit_message.side_effect = error
+                with (
+                    self.assertLogs("app.telegram_handlers", level="WARNING"),
+                    self.assertRaises(TelegramAPIError) as caught,
+                ):
+                    bot.handlers.handle_callback(
+                        {
+                            "id": "callback",
+                            "data": "setup:groups",
+                            "message": {"chat": {"id": 42}, "message_id": 20},
+                        }
+                    )
+                self.assertIs(caught.exception, error)
             finally:
                 bot.close()
 

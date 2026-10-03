@@ -55,6 +55,37 @@ class TelegramErrorTests(unittest.TestCase):
     def response(payload: dict) -> io.BytesIO:
         return io.BytesIO(json.dumps(payload).encode())
 
+    def test_callback_acknowledgement_has_a_short_timeout(self) -> None:
+        for method, timeout in (
+            ("answerCallbackQuery", 3),
+            ("getUpdates", 70),
+            ("sendMessage", 20),
+        ):
+            with (
+                self.subTest(method=method),
+                patch(
+                    "app.telegram_api.urllib.request.urlopen",
+                    return_value=self.response({"ok": True, "result": True}),
+                ) as request,
+            ):
+                TelegramAPI("test").request(method)
+                self.assertEqual(request.call_args.kwargs["timeout"], timeout)
+
+    def test_callback_rate_limit_does_not_delay_setup_with_a_retry(self) -> None:
+        with (
+            patch(
+                "app.telegram_api.urllib.request.urlopen",
+                return_value=self.response(
+                    {"ok": False, "error_code": 429, "parameters": {"retry_after": 30}}
+                ),
+            ) as request,
+            patch("app.telegram_api.time.sleep") as sleep,
+            self.assertRaises(TelegramRateLimitError),
+        ):
+            TelegramAPI("test").answer_callback("callback")
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
     def test_direct_request_waits_full_retry_after(self) -> None:
         with (
             patch(
