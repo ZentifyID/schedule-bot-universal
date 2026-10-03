@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import html
+import http.client
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -24,7 +25,7 @@ from .teacher_schedule import (
     teacher_key,
     teacher_names,
 )
-from .telegram_api import TelegramAPI
+from .telegram_api import TelegramAPI, TelegramAPIError
 from .telegram_queue import TelegramSendQueue
 
 logger = logging.getLogger(__name__)
@@ -347,7 +348,13 @@ class TelegramHandlers:
     def handle_callback(self, callback: dict[str, Any]) -> None:
         callback_id = str(callback.get("id", ""))
         if callback_id:
-            self.telegram.answer_callback(callback_id)
+            try:
+                self.telegram.answer_callback(callback_id)
+            except (TelegramAPIError, OSError, http.client.HTTPException) as error:
+                # Acknowledgement only stops Telegram's button spinner.
+                logger.warning(
+                    "Could not acknowledge setup callback; continuing setup: %s", error
+                )
         if callback.get("data") == "refresh":
             return
         message = callback.get("message") or {}

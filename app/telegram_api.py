@@ -76,10 +76,13 @@ class TelegramAPI:
         if parsed_url.scheme != "https" or parsed_url.hostname != "api.telegram.org":
             raise RuntimeError("Refusing an unsafe Telegram API URL")
         http_code = 0
+        timeout = 70 if method == "getUpdates" else 20
+        if method == "answerCallbackQuery":
+            timeout = 3
         try:
             # The HTTPS scheme and exact Telegram host are validated above.
             with urllib.request.urlopen(  # nosec B310
-                request, timeout=70 if method == "getUpdates" else 20
+                request, timeout=timeout
             ) as response:
                 payload = json.loads(_read_response(response).decode("utf-8"))
         except urllib.error.HTTPError as error:
@@ -143,4 +146,9 @@ class TelegramAPI:
         )
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
-        self.request("answerCallbackQuery", callback_query_id=callback_id, text=text)
+        self.request(
+            "answerCallbackQuery",
+            retry_rate_limit=False,
+            callback_query_id=callback_id,
+            text=text,
+        )
