@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,7 +59,7 @@ class TelegramErrorTests(unittest.TestCase):
     def test_callback_acknowledgement_has_a_short_timeout(self) -> None:
         for method, timeout in (
             ("answerCallbackQuery", 3),
-            ("getUpdates", 70),
+            ("getUpdates", 20),
             ("sendMessage", 20),
         ):
             with (
@@ -70,6 +71,21 @@ class TelegramErrorTests(unittest.TestCase):
             ):
                 TelegramAPI("test").request(method)
                 self.assertEqual(request.call_args.kwargs["timeout"], timeout)
+
+    def test_polling_preserves_offset_and_waits_less_than_socket_timeout(self) -> None:
+        update = {"update_id": 42, "message": {"text": "/today"}}
+        with patch(
+            "app.telegram_api.urllib.request.urlopen",
+            return_value=self.response({"ok": True, "result": [update]}),
+        ) as request:
+            self.assertEqual(TelegramAPI("test").updates(42), [update])
+        params = urllib.parse.parse_qs(request.call_args.args[0].data.decode())
+        self.assertEqual(params["offset"], ["42"])
+        self.assertEqual(params["timeout"], ["10"])
+        self.assertEqual(
+            json.loads(params["allowed_updates"][0]), ["message", "callback_query"]
+        )
+        self.assertLess(int(params["timeout"][0]), request.call_args.kwargs["timeout"])
 
     def test_callback_rate_limit_does_not_delay_setup_with_a_retry(self) -> None:
         with (

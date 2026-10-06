@@ -31,6 +31,77 @@ class FakeSender:
 
 
 class BotTests(unittest.TestCase):
+    def test_polling_recovers_without_losing_offset_or_background_checks(self) -> None:
+        for error in (
+            TimeoutError("read timed out"),
+            urllib.error.URLError("DNS unavailable"),
+            ConnectionResetError("connection reset"),
+            http.client.IncompleteRead(b"partial response"),
+            http.client.RemoteDisconnected("connection closed"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                bot = self.make_bot(directory)
+                bot.offset = 42
+                update = {"update_id": 42, "message": {"text": "/today"}}
+                with (
+                    patch.object(bot, "initialize"),
+                    patch.object(bot.schedules, "groups", return_value=[]),
+                    patch.object(
+                        bot.telegram,
+                        "updates",
+                        side_effect=[error, [update], KeyboardInterrupt()],
+                    ) as updates,
+                    patch.object(bot, "_submit_update") as submit,
+                    patch.object(bot, "_maybe_refresh_schedule") as refresh,
+                    patch.object(bot, "_maybe_autopost") as autopost,
+                    patch("app.bot.time.sleep") as sleep,
+                    self.assertLogs("app.bot", level="WARNING") as logs,
+                ):
+                    bot.run()
+                self.assertEqual(
+                    [call.args[0] for call in updates.call_args_list], [42, 42, 43]
+                )
+                submit.assert_called_once_with(update)
+                sleep.assert_called_once_with(1)
+                self.assertEqual(refresh.call_count, 2)
+                self.assertEqual(autopost.call_count, 2)
+                self.assertTrue(bot._closed)
+                self.assertEqual(len(logs.records), 1)
+                self.assertIsNone(logs.records[0].exc_info)
+
+    def test_polling_backoff_is_capped_and_resets_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(directory)
+            failures = [TimeoutError("read timed out") for _ in range(5)]
+            with (
+                patch.object(bot, "initialize"),
+                patch.object(bot.schedules, "groups", return_value=[]),
+                patch.object(
+                    bot.telegram,
+                    "updates",
+                    side_effect=[
+                        *failures,
+                        [],
+                        TimeoutError("again"),
+                        KeyboardInterrupt(),
+                    ],
+                ),
+                patch.object(bot, "_maybe_refresh_schedule") as refresh,
+                patch.object(bot, "_maybe_autopost") as autopost,
+                patch("app.bot.time.sleep") as sleep,
+                self.assertLogs("app.bot", level="WARNING"),
+            ):
+                bot.run()
+            self.assertEqual(
+                [call.args[0] for call in sleep.call_args_list], [1, 2, 4, 5, 5, 1]
+            )
+            self.assertEqual(refresh.call_count, 7)
+            self.assertEqual(autopost.call_count, 7)
+            self.assertTrue(bot._closed)
+
     def test_submission_filters_spam_and_releases_failed_requests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bot = self.make_bot(directory)

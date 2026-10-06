@@ -8,6 +8,8 @@ import urllib.request
 from typing import Any
 
 MAX_TELEGRAM_RESPONSE_BYTES = 10 * 1024 * 1024
+POLL_TIMEOUT_SECONDS = 10
+POLL_SOCKET_TIMEOUT_SECONDS = POLL_TIMEOUT_SECONDS + 10
 
 
 class TelegramAPIError(RuntimeError):
@@ -76,7 +78,7 @@ class TelegramAPI:
         if parsed_url.scheme != "https" or parsed_url.hostname != "api.telegram.org":
             raise RuntimeError("Refusing an unsafe Telegram API URL")
         http_code = 0
-        timeout = 70 if method == "getUpdates" else 20
+        timeout = POLL_SOCKET_TIMEOUT_SECONDS if method == "getUpdates" else 20
         if method == "answerCallbackQuery":
             timeout = 3
         try:
@@ -105,7 +107,7 @@ class TelegramAPI:
         return self.request(
             "getUpdates",
             offset=offset,
-            timeout=50,
+            timeout=POLL_TIMEOUT_SECONDS,
             allowed_updates=["message", "callback_query"],
         )
 

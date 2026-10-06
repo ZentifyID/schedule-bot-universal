@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import http.client
 import logging
 import re
 import threading
@@ -236,22 +237,44 @@ class Bot:
     def run(self) -> None:
         self.initialize()
         logger.info("Bot started groups=%s", len(self.schedules.groups()))
+        network_failures = 0
         try:
             while True:
+                retry_delay = 0
                 try:
                     for update in self.telegram.updates(self.offset):
                         self.offset = int(update["update_id"]) + 1
                         self._submit_update(update)
+                    network_failures = 0
+                except (
+                    urllib.error.URLError,
+                    OSError,
+                    http.client.HTTPException,
+                ) as error:
+                    network_failures = min(network_failures + 1, 4)
+                    retry_delay = min(2 ** (network_failures - 1), 5)
+                    logger.warning(
+                        "Polling network error: %s; retrying in %s seconds",
+                        error,
+                        retry_delay,
+                    )
+                except Exception:
+                    logger.exception("Runtime iteration failed; retrying in 5 seconds")
+                    retry_delay = 5
+
+                # Polling failures must not postpone refreshes or automatic posts.
+                try:
                     now_ts = time.time()
                     now = dt.datetime.now(self.timezone)
                     self._maybe_refresh_schedule(now_ts)
                     self._maybe_autopost(now, now_ts)
-                except urllib.error.URLError as error:
-                    logger.warning("Network error: %s; retrying in 5 seconds", error)
-                    time.sleep(5)
                 except Exception:
-                    logger.exception("Runtime iteration failed; retrying in 5 seconds")
-                    time.sleep(5)
+                    logger.exception(
+                        "Background scheduling failed; retrying in 5 seconds"
+                    )
+                    retry_delay = max(retry_delay, 5)
+                if retry_delay:
+                    time.sleep(retry_delay)
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         finally:
