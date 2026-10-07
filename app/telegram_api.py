@@ -49,14 +49,13 @@ class TelegramAPI:
     def request(
         self, method: str, *, retry_rate_limit: bool = True, **params: Any
     ) -> Any:
-        for attempt in range(2):
-            try:
-                return self._request_once(method, params)
-            except TelegramRateLimitError as error:
-                if not retry_rate_limit or attempt == 1:
-                    raise
-                time.sleep(error.retry_after)
-        raise RuntimeError(f"Telegram API {method}: retry limit reached")
+        try:
+            return self._request_once(method, params)
+        except TelegramRateLimitError as error:
+            if not retry_rate_limit:
+                raise
+            time.sleep(error.retry_after)
+        return self._request_once(method, params)
 
     def _request_once(self, method: str, params: dict[str, Any]) -> Any:
         encoded: dict[str, str] = {}
@@ -89,10 +88,20 @@ class TelegramAPI:
                 payload = json.loads(_read_response(response).decode("utf-8"))
         except urllib.error.HTTPError as error:
             http_code = error.code
-            try:
-                payload = json.loads(_read_response(error).decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError, RuntimeError, OSError):
-                raise TelegramAPIError(method, http_code, f"HTTP {http_code}") from None
+            with error:
+                try:
+                    payload = json.loads(_read_response(error).decode("utf-8"))
+                except (
+                    json.JSONDecodeError,
+                    UnicodeDecodeError,
+                    RuntimeError,
+                    OSError,
+                ):
+                    raise TelegramAPIError(
+                        method, http_code, f"HTTP {http_code}"
+                    ) from None
+        if not isinstance(payload, dict):
+            raise TelegramAPIError(method, http_code, "Invalid JSON response")
         if payload.get("ok"):
             return payload.get("result")
         code = int(payload.get("error_code", http_code))

@@ -22,6 +22,15 @@ COMMANDS = {
 SCHEDULE_COMMANDS = {"/today", "/tomorrow", "/date", "/week"}
 
 
+def parse_command(text: str) -> tuple[str, str]:
+    parts = text.strip().split(maxsplit=1)
+    if not parts:
+        return "", ""
+    return parts[0].split("@", 1)[0].casefold(), parts[1].strip() if len(
+        parts
+    ) > 1 else ""
+
+
 class CommandGuard:
     """Bound incoming work before submission to the shared executor."""
 
@@ -52,17 +61,11 @@ class CommandGuard:
             ):
                 return None
         else:
-            parts = str(message.get("text", "")).strip().split(maxsplit=1)
-            if not parts:
-                return None
-            command = parts[0].split("@", 1)[0].casefold()
+            command, argument = parse_command(str(message.get("text", "")))
             if command not in COMMANDS:
                 return None
-            argument = (
-                parts[1].strip()
-                if command in {"/date", "/calendar_format"} and len(parts) > 1
-                else ""
-            )
+            if command not in {"/date", "/calendar_format"}:
+                argument = ""
         request = (chat_id, message.get("message_thread_id") or 0, command, argument)
         recent_key = (user_id, *request)
         active_key = request if command in SCHEDULE_COMMANDS else recent_key

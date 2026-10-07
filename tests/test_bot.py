@@ -31,6 +31,34 @@ class FakeSender:
 
 
 class BotTests(unittest.TestCase):
+    def test_initialization_failure_closes_workers_and_preserves_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(directory)
+            with (
+                patch.object(
+                    bot, "initialize", side_effect=RuntimeError("source unavailable")
+                ),
+                self.assertRaisesRegex(RuntimeError, "source unavailable"),
+            ):
+                bot.run()
+            self.assertTrue(bot._closed)
+            self.assertFalse(bot.sender._worker.is_alive())
+            self.assertTrue(bot.executor._shutdown)
+            bot.close()
+
+    def test_shutdown_closes_sender_even_if_calendar_close_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(directory)
+            with (
+                patch.object(
+                    bot.calendar, "close", side_effect=RuntimeError("calendar error")
+                ),
+                self.assertRaisesRegex(RuntimeError, "calendar error"),
+            ):
+                bot.close()
+            self.assertFalse(bot.sender._worker.is_alive())
+            self.assertTrue(bot.executor._shutdown)
+
     def test_polling_recovers_without_losing_offset_or_background_checks(self) -> None:
         for error in (
             TimeoutError("read timed out"),
@@ -189,7 +217,9 @@ class BotTests(unittest.TestCase):
                             "from": {"id": 42},
                         }
                     )
-                self.assertEqual(bot.handlers._binding_group(42, None), "11 ис")
+                self.assertEqual(
+                    bot.storage.get_binding(42, None)["target_name"], "11 ис"
+                )
                 bot.handlers.handle_message({**message, "text": "/help"})
                 help_text = bot.handlers.sender.send_message.call_args.args[1]
                 self.assertNotIn("/refresh", help_text)

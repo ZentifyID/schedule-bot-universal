@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.autopost import AutopostService
 from app.storage import Storage
@@ -12,6 +13,9 @@ from app.yandex_disk import file_fingerprint
 
 
 class FakeSchedules:
+    def snapshot(self) -> FakeSchedules:
+        return self
+
     def schedule_for(
         self, group: str, target_date: dt.date, _week_start: dt.date
     ) -> dict:
@@ -57,6 +61,46 @@ class FakeSender:
 
 
 class AutopostTests(unittest.TestCase):
+    def test_shared_target_is_calculated_once_and_unchanged_bindings_are_not_written(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            for chat_id in (1, 2):
+                storage.set_binding(chat_id, None, "11 ис")
+                storage.set_autopost(chat_id, None, True)
+            schedules = FakeSchedules()
+            sender = FakeSender()
+            service = AutopostService(
+                SimpleNamespace(numerator_week_start=dt.date(2026, 8, 31)),
+                storage,
+                schedules,
+                FakeReplacements(),
+                sender,
+                lambda: None,
+            )
+            now = dt.datetime(2026, 9, 1, 12, tzinfo=dt.timezone.utc)
+            with patch.object(
+                schedules, "schedule_for", wraps=schedules.schedule_for
+            ) as calculate:
+                service.run(now)
+                self.assertEqual(calculate.call_count, 1)
+            self.assertEqual(len(sender.messages), 2)
+            with storage.connect() as db:
+                db.execute("UPDATE bindings SET updated_at='unchanged'")
+            service.run(now)
+            self.assertEqual(len(sender.messages), 2)
+            self.assertTrue(
+                all(
+                    storage.get_binding(chat, None)["updated_at"] == "unchanged"
+                    for chat in (1, 2)
+                )
+            )
+            storage.record_autopost_failure(1, 0, "temporary error")
+            service.run(now)
+            self.assertEqual(storage.get_binding(1, None)["autopost_failures"], 0)
+            self.assertEqual(len(sender.messages), 2)
+
     def test_edited_file_resends_only_changed_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory))

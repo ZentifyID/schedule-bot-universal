@@ -184,6 +184,7 @@ class ReplacementRepository:
             OrderedDict()
         )
         self._cache_size = max(cache_size, 1)
+        # ponytail: one lock prevents duplicate downloads; split by file if latency grows.
         self._lock = threading.RLock()
 
     def _remember(self, cache: OrderedDict[str, Any], key: str, value: Any) -> Any:

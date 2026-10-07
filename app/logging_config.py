@@ -39,6 +39,8 @@ def configure_logging(data_dir: Path, level: str = "INFO") -> None:
         handler.setFormatter(formatter)
 
     root = logging.getLogger()
+    for handler in root.handlers:
+        handler.close()
     root.handlers.clear()
     root.setLevel(numeric_level)
     for handler in handlers:

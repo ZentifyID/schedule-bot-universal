@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -17,7 +18,6 @@ def _read_url(request: urllib.request.Request, timeout: int, max_bytes: int) -> 
     requested_url = urllib.parse.urlparse(request.full_url)
     if requested_url.scheme != "https" or not requested_url.hostname:
         raise ValueError("Refusing an unsafe network URL")
-    last_error: Exception | None = None
     for attempt in range(3):
         try:
             # The HTTPS scheme is validated before this request and after redirects.
@@ -47,13 +47,14 @@ def _read_url(request: urllib.request.Request, timeout: int, max_bytes: int) -> 
                         f"Remote file is larger than the {max_bytes} byte limit"
                     )
                 return content
-        except (TimeoutError, urllib.error.URLError) as error:
-            last_error = error
-            if attempt < 2:
-                time.sleep(1 + attempt * 2)
-    if last_error is None:
-        raise RuntimeError("Network request failed without an error")
-    raise last_error
+        except (OSError, http.client.HTTPException) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+                if error.code != 429 and error.code < 500:
+                    raise
+            if attempt == 2:
+                raise
+            time.sleep(1 + attempt * 2)
 
 
 def _get_json(url: str, params: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
@@ -61,7 +62,10 @@ def _get_json(url: str, params: dict[str, Any], timeout: int = 30) -> dict[str, 
     request = urllib.request.Request(
         f"{url}?{query}", headers={"User-Agent": "schedule-bot/2"}
     )
-    return json.loads(_read_url(request, timeout, MAX_JSON_BYTES).decode("utf-8"))
+    payload = json.loads(_read_url(request, timeout, MAX_JSON_BYTES).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("Yandex Disk returned an invalid JSON response")
+    return payload
 
 
 def list_public_files(public_url: str) -> list[dict[str, Any]]:

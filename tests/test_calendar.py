@@ -378,6 +378,23 @@ class CalendarTests(unittest.TestCase):
                 "INSERT INTO calendar_subscriptions VALUES (?, 42, 0, 'group', '11 ис')",
                 (self.token,),
             )
+        migrate = Storage._migrate_database
+
+        def interrupted(storage, db):
+            migrate(storage, db)
+            raise RuntimeError("interrupted migration")
+
+        with (
+            patch.object(Storage, "_migrate_database", interrupted),
+            self.assertRaisesRegex(RuntimeError, "interrupted migration"),
+        ):
+            Storage(directory)
+        with closing(sqlite3.connect(directory / "bot.sqlite3")) as db:
+            self.assertNotIn("user_id", Storage._columns(db, "calendar_subscriptions"))
+            self.assertEqual(
+                db.execute("SELECT token FROM calendar_subscriptions").fetchone()[0],
+                self.token,
+            )
         storage = Storage(directory)
         storage.set_binding(42, None, "11 ис")
         self.assertEqual(storage.calendar_subscription(42, None)["token"], self.token)
@@ -651,6 +668,61 @@ class CalendarTests(unittest.TestCase):
         self.assertEqual(
             self.storage.calendar_feed_data(token, DAY, DAY)[0]["title_format"], "full"
         )
+
+    def test_private_choices_formats_and_group_settings_are_isolated(self) -> None:
+        bot = Bot(self.config)
+        self.addCleanup(bot.close)
+        bot.handlers.sender = MagicMock()
+        bot.handlers.telegram = MagicMock()
+        bot.handlers.replacements = self.replacements
+        bot.handlers.validate_semester = lambda: None
+        for user_id, group in ((5, "11 ис"), (6, "12 ис")):
+            message = {
+                "chat": {"id": user_id, "type": "private"},
+                "from": {"id": user_id},
+            }
+            bot.handlers.handle_callback(
+                {"data": f"group:{group}", "message": message, "from": {"id": user_id}}
+            )
+            bot.handlers.handle_message({**message, "text": "/calendar"})
+        bot.handlers.handle_message(
+            {"chat": {"id": 5}, "from": {"id": 5}, "text": "/calendar_format\tshort"}
+        )
+        bot.handlers.handle_callback(
+            {
+                "data": "group:12 ис",
+                "from": {"id": 5},
+                "message": {
+                    "chat": {"id": -100, "type": "supergroup"},
+                    "message_thread_id": 8,
+                },
+            }
+        )
+        storage = Storage(self.config.data_dir)
+        self.assertEqual(storage.get_binding(5, None)["target_name"], "11 ис")
+        self.assertEqual(storage.get_binding(6, None)["target_name"], "12 ис")
+        self.assertEqual(storage.get_binding(-100, 8)["target_name"], "12 ис")
+        tokens = [
+            storage.calendar_subscription(user, None, user)["token"] for user in (5, 6)
+        ]
+        self.service.run(self.now(10))
+        first, second = [
+            self.service.feed(token, self.now(10)).decode() for token in tokens
+        ]
+        self.assertIn("SUMMARY:Иванова 101", first)
+        self.assertNotIn("Практика", first)
+        self.assertIn("SUMMARY:3. Практика", second)
+        self.assertNotIn("Алгебра", second)
+        for user_id, group in ((5, "11 ИС"), (6, "12 ИС")):
+            bot.handlers.handle_message(
+                {
+                    "chat": {"id": user_id},
+                    "from": {"id": user_id},
+                    "text": "/date\t08.10.2026",
+                }
+            )
+            text = bot.handlers.sender.send_message.call_args.args[1]
+            self.assertIn(f"Группа: <b>{group}</b>", text)
 
     def test_config_validates_calendar_settings(self) -> None:
         env = {"TELEGRAM_BOT_TOKEN": "test", "NUMERATOR_WEEK_START": "2026-10-05"}

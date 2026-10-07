@@ -240,15 +240,19 @@ class Bot:
             return
         self._closed = True
         logger.info("Stopping bot")
-        self.calendar.close()
-        self.executor.shutdown(wait=True, cancel_futures=False)
-        self.sender.close()
+        try:
+            self.calendar.close()
+        finally:
+            try:
+                self.executor.shutdown(wait=True, cancel_futures=False)
+            finally:
+                self.sender.close()
 
     def run(self) -> None:
-        self.initialize()
-        logger.info("Bot started groups=%s", len(self.schedules.groups()))
         network_failures = 0
         try:
+            self.initialize()
+            logger.info("Bot started groups=%s", len(self.schedules.groups()))
             self.calendar.start()
             while True:
                 retry_delay = 0

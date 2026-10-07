@@ -14,10 +14,11 @@ from urllib.parse import urlsplit
 
 from .config import Config
 from .pdf_parser import PAIR_TIMES_DISPLAY
-from .replacement_service import ReplacementRepository, apply_replacements
+from .replacement_service import ReplacementRepository
+from .schedule_calculator import schedule_for_target
 from .schedule_service import ScheduleRepository
 from .storage import Storage
-from .teacher_schedule import correct_teacher_name, schedule_for_teacher, teacher_names
+from .teacher_schedule import correct_teacher_name, teacher_names
 
 logger = logging.getLogger(__name__)
 
@@ -202,19 +203,14 @@ class CalendarService:
                     return
                 kind, name = target["target_type"], target["target_name"]
                 try:
-                    if kind == "teacher":
-                        schedule = schedule_for_teacher(
-                            schedules,
-                            name,
-                            date,
-                            self.config.numerator_week_start,
-                            by_group,
-                        )
-                    else:
-                        base = schedules.schedule_for(
-                            name, date, self.config.numerator_week_start
-                        )
-                        schedule = apply_replacements(base, by_group.get(name, []))
+                    schedule = schedule_for_target(
+                        schedules,
+                        kind,
+                        name,
+                        date,
+                        self.config.numerator_week_start,
+                        by_group,
+                    )
                     events = calendar_events(kind, name, schedule, self.timezone)
                     self.storage.save_calendar_day(kind, name, date, events, now)
                 except Exception:
@@ -242,7 +238,11 @@ class CalendarService:
         )
 
     def start(self) -> None:
-        if not self.config.calendar_public_url or self._server is not None:
+        if (
+            self._stop.is_set()
+            or not self.config.calendar_public_url
+            or self._server is not None
+        ):
             return
         service = self
 
@@ -300,7 +300,7 @@ class CalendarService:
         )
         self._publisher_thread.start()
         logger.info(
-            "Calendar endpoint listening on 127.0.0.1:%s", self.config.calendar_port
+            "Calendar endpoint listening on 127.0.0.1:%s", self._server.server_port
         )
 
     def _publish_loop(self) -> None:
@@ -330,8 +330,10 @@ class CalendarService:
     def close(self) -> None:
         self._stop.set()
         if self._server:
-            self._server.shutdown()
+            if self._http_thread and self._http_thread.is_alive():
+                self._server.shutdown()
             self._server.server_close()
         for thread in (self._http_thread, self._publisher_thread):
-            if thread:
+            if thread and thread.ident is not None:
                 thread.join()
+        self._server = None

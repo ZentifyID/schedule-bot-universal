@@ -82,65 +82,68 @@ class Storage:
                 );
                 """
             )
-            self._ensure_column(
-                db, "bindings", "autopost_failures", "INTEGER NOT NULL DEFAULT 0"
-            )
-            self._ensure_column(db, "bindings", "autopost_last_error", "TEXT")
-            if "user_id" not in self._columns(db, "calendar_subscriptions"):
-                db.execute("BEGIN")
-                db.execute("ALTER TABLE calendar_subscriptions RENAME TO old_calendars")
-                db.execute("""
-                    CREATE TABLE calendar_subscriptions (
-                        token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL,
-                        thread_id INTEGER NOT NULL, target_type TEXT NOT NULL,
-                        target_name TEXT NOT NULL, user_id INTEGER NOT NULL DEFAULT 0,
-                        UNIQUE(chat_id, thread_id, target_type, target_name, user_id)
-                    )
-                """)
-                # Existing shared URLs remain valid and keep their default long titles.
-                db.execute("""
-                    INSERT INTO calendar_subscriptions
-                    SELECT token, chat_id, thread_id, target_type, target_name, 0
-                    FROM old_calendars
-                """)
-                db.execute("DROP TABLE old_calendars")
-            if "group_name" in self._columns(db, "bindings"):
-                db.execute("ALTER TABLE bindings RENAME TO old_bindings")
-                db.execute("""
-                    CREATE TABLE bindings (
-                        chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0,
-                        target_type TEXT NOT NULL DEFAULT 'group', target_name TEXT NOT NULL,
-                        autopost INTEGER NOT NULL DEFAULT 0,
-                        autopost_failures INTEGER NOT NULL DEFAULT 0,
-                        autopost_last_error TEXT,
-                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (chat_id, thread_id)
-                    )
-                """)
-                db.execute("""
-                    INSERT INTO bindings
-                    SELECT chat_id, thread_id, 'group', group_name, autopost,
-                           autopost_failures, autopost_last_error, updated_at
-                    FROM old_bindings
-                """)
-                db.execute("DROP TABLE old_bindings")
-            if "group_name" in self._columns(db, "sent_autoposts"):
-                db.execute("ALTER TABLE sent_autoposts RENAME TO old_sent_autoposts")
-                db.execute("""
-                    CREATE TABLE sent_autoposts (
-                        chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0,
-                        target_type TEXT NOT NULL DEFAULT 'group', target_name TEXT NOT NULL,
-                        target_date TEXT NOT NULL, fingerprint TEXT NOT NULL,
-                        sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (chat_id, thread_id, target_type, target_name, target_date)
-                    )
-                """)
-                db.execute("""
-                    INSERT INTO sent_autoposts
-                    SELECT chat_id, thread_id, 'group', group_name, target_date,
-                           fingerprint, sent_at FROM old_sent_autoposts
-                """)
-                db.execute("DROP TABLE old_sent_autoposts")
+            db.execute("BEGIN IMMEDIATE")
+            self._migrate_database(db)
+
+    def _migrate_database(self, db: sqlite3.Connection) -> None:
+        self._ensure_column(
+            db, "bindings", "autopost_failures", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._ensure_column(db, "bindings", "autopost_last_error", "TEXT")
+        if "user_id" not in self._columns(db, "calendar_subscriptions"):
+            db.execute("ALTER TABLE calendar_subscriptions RENAME TO old_calendars")
+            db.execute("""
+                CREATE TABLE calendar_subscriptions (
+                    token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL, target_type TEXT NOT NULL,
+                    target_name TEXT NOT NULL, user_id INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(chat_id, thread_id, target_type, target_name, user_id)
+                )
+            """)
+            # Existing shared URLs remain valid and keep their default long titles.
+            db.execute("""
+                INSERT INTO calendar_subscriptions
+                SELECT token, chat_id, thread_id, target_type, target_name, 0
+                FROM old_calendars
+            """)
+            db.execute("DROP TABLE old_calendars")
+        if "group_name" in self._columns(db, "bindings"):
+            db.execute("ALTER TABLE bindings RENAME TO old_bindings")
+            db.execute("""
+                CREATE TABLE bindings (
+                    chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0,
+                    target_type TEXT NOT NULL DEFAULT 'group', target_name TEXT NOT NULL,
+                    autopost INTEGER NOT NULL DEFAULT 0,
+                    autopost_failures INTEGER NOT NULL DEFAULT 0,
+                    autopost_last_error TEXT,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, thread_id)
+                )
+            """)
+            db.execute("""
+                INSERT INTO bindings
+                SELECT chat_id, thread_id, 'group', group_name, autopost,
+                       autopost_failures, autopost_last_error, updated_at
+                FROM old_bindings
+            """)
+            db.execute("DROP TABLE old_bindings")
+        if "group_name" in self._columns(db, "sent_autoposts"):
+            db.execute("ALTER TABLE sent_autoposts RENAME TO old_sent_autoposts")
+            db.execute("""
+                CREATE TABLE sent_autoposts (
+                    chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0,
+                    target_type TEXT NOT NULL DEFAULT 'group', target_name TEXT NOT NULL,
+                    target_date TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                    sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, thread_id, target_type, target_name, target_date)
+                )
+            """)
+            db.execute("""
+                INSERT INTO sent_autoposts
+                SELECT chat_id, thread_id, 'group', group_name, target_date,
+                       fingerprint, sent_at FROM old_sent_autoposts
+            """)
+            db.execute("DROP TABLE old_sent_autoposts")
 
     @staticmethod
     def _columns(db: sqlite3.Connection, table: str) -> set[str]:
@@ -167,9 +170,12 @@ class Storage:
 
     def save_cache(self, cache: dict[str, Any]) -> None:
         temporary = self.cache_path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8") as file:
-            json.dump(cache, file, ensure_ascii=False, indent=2)
-        temporary.replace(self.cache_path)
+        try:
+            with temporary.open("w", encoding="utf-8") as file:
+                json.dump(cache, file, ensure_ascii=False, indent=2)
+            temporary.replace(self.cache_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def set_binding(
         self, chat_id: int, thread_id: int | None, name: str, target_type: str = "group"
@@ -392,6 +398,7 @@ class Storage:
                 UPDATE bindings
                 SET autopost_failures=0, autopost_last_error=NULL, updated_at=CURRENT_TIMESTAMP
                 WHERE chat_id=? AND thread_id=?
+                  AND (autopost_failures != 0 OR autopost_last_error IS NOT NULL)
                 """,
                 (chat_id, thread_id),
             )

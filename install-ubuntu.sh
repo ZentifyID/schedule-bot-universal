@@ -7,7 +7,7 @@ APP_DIR="/opt/schedule-bot-universal"
 REPO_DIR="$APP_DIR/repo"
 DATA_DIR="$APP_DIR/data"
 ENV_PATH="$APP_DIR/.env"
-REPO_URL="${REPO_URL:-https://github.com/ZentifyID/schedule-bot-universal.git}"
+REPO_URL="${REPO_URL:-https://github.com/xaku56/schedule-bot-universal.git}"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
 if (( EUID != 0 )); then

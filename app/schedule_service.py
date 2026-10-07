@@ -207,8 +207,15 @@ class ScheduleRepository(ScheduleSnapshot):
                 else:
                     if not source_unchanged or not local_path.exists():
                         content = download_public_file(self.public_url, item)
-                        local_path.write_bytes(_validated_pdf(content, name))
-                    parsed = parse_schedule_pdf(local_path, course=course)
+                        temporary = local_path.with_suffix(".tmp.pdf")
+                        try:
+                            temporary.write_bytes(_validated_pdf(content, name))
+                            parsed = parse_schedule_pdf(temporary, course=course)
+                            temporary.replace(local_path)
+                        finally:
+                            temporary.unlink(missing_ok=True)
+                    else:
+                        parsed = parse_schedule_pdf(local_path, course=course)
                     rebuilt_courses.append(course)
                 duplicates = set(all_groups).intersection(parsed)
                 if duplicates:

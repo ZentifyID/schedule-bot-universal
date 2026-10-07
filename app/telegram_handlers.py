@@ -8,9 +8,10 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from .command_guard import COMMANDS
+from .command_guard import COMMANDS, parse_command
 from .config import Config
 from .replacement_service import ReplacementRepository
+from .schedule_calculator import schedule_for_target
 from .schedule_formatter import (
     format_schedule,
     format_teacher_schedule,
@@ -21,7 +22,6 @@ from .schedule_service import ScheduleRepository, ScheduleSnapshot, parse_flexib
 from .storage import Storage
 from .teacher_schedule import (
     available_teachers,
-    schedule_for_teacher,
     teacher_key,
     teacher_names,
 )
@@ -79,12 +79,6 @@ class TelegramHandlers:
         self.sender = sender
         self.timezone = timezone
         self.validate_semester = validate_semester
-
-    def _binding_group(self, chat_id: int, thread_id: int | None) -> str | None:
-        row = self.storage.get_binding(chat_id, thread_id)
-        return (
-            str(row["target_name"]) if row and row["target_type"] == "group" else None
-        )
 
     def _send_setup(self, chat_id: int, thread_id: int | None) -> None:
         self.sender.send_message(
@@ -175,38 +169,26 @@ class TelegramHandlers:
     ) -> tuple[dict[str, Any], str | None]:
         self.validate_semester()
         schedules = snapshot if snapshot is not None else self.schedules
-        if target_type == "teacher":
-            item = (
-                self.replacements.find_for_date(target_date)
-                if include_replacements
-                else None
-            )
-            by_group = self.replacements.replacements_for_item(item) if item else None
-            schedule = schedule_for_teacher(
-                schedules,
-                name,
-                target_date,
-                self.config.numerator_week_start,
-                by_group,
-            )
-            note = (
-                "Файл замен на эту дату не найден — показано базовое расписание."
-                if include_replacements and not item
-                else None
-            )
-            return schedule, note
-        base = schedules.schedule_for(
-            name, target_date, self.config.numerator_week_start
+        item = (
+            self.replacements.find_for_date(target_date)
+            if include_replacements
+            else None
         )
-        if not include_replacements:
-            return base, None
-        final, replacement_fingerprint = self.replacements.apply_for_date(
-            base, target_date
+        by_group = self.replacements.replacements_for_item(item) if item else None
+        schedule = schedule_for_target(
+            schedules,
+            target_type,
+            name,
+            target_date,
+            self.config.numerator_week_start,
+            by_group,
         )
-        note = None
-        if replacement_fingerprint is None:
-            note = "Файл замен на эту дату не найден — показано базовое расписание."
-        return final, note
+        note = (
+            "Файл замен на эту дату не найден — показано базовое расписание."
+            if include_replacements and item is None
+            else None
+        )
+        return schedule, note
 
     def _send_date(
         self,
@@ -231,139 +213,161 @@ class TelegramHandlers:
         )
         self.sender.send_message(chat_id, message, thread_id)
 
-    def handle_message(self, message: dict[str, Any]) -> None:
-        chat = message.get("chat") or {}
-        if "id" not in chat:
+    def _send_help(self, chat_id: int, thread_id: int | None) -> None:
+        self.sender.send_message(
+            chat_id,
+            "<b>Команды расписания</b>\n"
+            "/setup — выбрать группу или преподавателя для чата или темы.\n"
+            "/today — расписание на сегодня с опубликованными заменами.\n"
+            "/tomorrow — расписание на завтра с опубликованными заменами.\n"
+            "/date DD.MM.YYYY — расписание на дату, например /date 16.09.2026.\n"
+            "/week — основное расписание без замен: оба варианта недели, "
+            "по сообщению на день. Ч — числитель, З — знаменатель; "
+            "суббота показывается при наличии пар.\n\n"
+            "<b>Настройки</b>\n"
+            "/autopost_on — присылать расписание на завтра после появления "
+            "файла замен, даже если для выбранной группы или преподавателя замен нет. "
+            "Повторно — только при изменении итогового расписания.\n"
+            "/autopost_off — отключить автоотправку.\n"
+            "/calendar — ваша ссылка календаря выбранной группы или преподавателя.\n"
+            "/calendar_format short — заголовки «Фамилия кабинет» только для вас.\n"
+            "/calendar_format full — вернуть длинные заголовки (по умолчанию).\n"
+            "/calendar_off — отозвать ваши ссылки календарей этого чата/темы.\n"
+            "/help — эта справка.\n\n"
+            "Выбор расписания и автоотправка в личном чате — только для вас. "
+            "В группах настройки общие для чата или темы. "
+            "Менять их может любой участник. Формат календаря индивидуальный "
+            "для всех ваших личных подписок. "
+            "Расписание обновляется автоматически.\n"
+            "Частые повторы команд пропускаются. Дождитесь завершения ответа "
+            "перед повторным запросом.",
+            thread_id,
+        )
+
+    def _set_calendar_format(
+        self, user_id: int, argument: str, chat_id: int, thread_id: int | None
+    ) -> None:
+        title_format = argument.strip().casefold()
+        if title_format not in {"short", "full"}:
+            self.sender.send_message(
+                chat_id,
+                "/calendar_format short — «Фамилия кабинет», например «Зыбина 506б».\n"
+                "/calendar_format full — длинные заголовки (по умолчанию).\n"
+                "Настройка действует только на ваши личные ссылки из /calendar.",
+                thread_id,
+            )
             return
-        chat_id = int(chat["id"])
+        self.storage.set_calendar_format(user_id, title_format)
+        label = "«Фамилия кабинет»" if title_format == "short" else "длинные заголовки"
+        self.sender.send_message(
+            chat_id,
+            f"Ваш формат календаря: {label}. "
+            "Других пользователей это не затрагивает. "
+            "Подключать вашу подписку заново не нужно: изменения появятся "
+            "при обновлении календаря. Для старой общей ссылки получите "
+            "личную через /calendar.",
+            thread_id,
+        )
+
+    def _send_calendar(self, user_id: int, chat_id: int, thread_id: int | None) -> None:
+        if not self.config.calendar_public_url:
+            self.sender.send_message(
+                chat_id,
+                "Календарь пока не настроен на сервере. Нужен CALENDAR_PUBLIC_URL с HTTPS.",
+                thread_id,
+            )
+            return
+        subscription = self.storage.calendar_subscription(chat_id, thread_id, user_id)
+        if subscription is None:
+            self._send_setup(chat_id, thread_id)
+            return
+        name = str(subscription["target_name"])
+        label = (
+            "Преподаватель" if subscription["target_type"] == "teacher" else "Группа"
+        )
+        url = f"{self.config.calendar_public_url}/calendar/{subscription['token']}.ics"
+        self.sender.send_message(
+            chat_id,
+            f"<b>{label}: {html.escape(name)}</b>\n"
+            "В этом календаре только выбранная группа или преподаватель.\n"
+            "Пары на завтра публикуются после обнаружения файла замен. "
+            "При изменении ваших пар календарь обновляется без дублей.\n"
+            "Это ваша личная ссылка. /calendar_format short — «Фамилия кабинет», "
+            "/calendar_format full — длинные заголовки.\n\n"
+            "iPhone: Календарь → Календари → Добавить календарь → "
+            "Добавить подписной календарь. Вставьте этот адрес:\n"
+            f"<code>{html.escape(url)}</code>\n\n"
+            "Google Calendar: в веб-версии Другие календари → Добавить по URL. "
+            "Используйте подписку, а не разовый импорт файла.\n"
+            "До первой публикации календарь может быть пустым. "
+            "Скорость обновления зависит от приложения.\n"
+            "Ссылка закреплена за этим выбором. После смены /setup запросите новую "
+            "через /calendar и удалите старую подписку в телефоне. "
+            "Ссылка даёт доступ к расписанию — передавайте её только намеренно.",
+            thread_id,
+        )
+
+    def _send_week(
+        self,
+        chat_id: int,
+        thread_id: int | None,
+        name: str,
+        target_type: str,
+        now: dt.datetime,
+    ) -> None:
+        monday = now.date() - dt.timedelta(days=now.weekday())
+        self.validate_semester()
+        snapshot = self.schedules.snapshot()
+        for day_offset in range(6):
+            first, _ = self._schedule(
+                name,
+                monday + dt.timedelta(days=day_offset),
+                target_type=target_type,
+                include_replacements=False,
+                snapshot=snapshot,
+            )
+            second, _ = self._schedule(
+                name,
+                monday + dt.timedelta(days=day_offset + 7),
+                target_type=target_type,
+                include_replacements=False,
+                snapshot=snapshot,
+            )
+            schedules = {first["week_type"]: first, second["week_type"]: second}
+            numerator_pairs = schedules["числитель"]["pairs"]
+            denominator_pairs = schedules["знаменатель"]["pairs"]
+            if day_offset == 5 and not (numerator_pairs or denominator_pairs):
+                continue
+            self.sender.send_message(
+                chat_id,
+                (
+                    format_teacher_weekday_schedule
+                    if target_type == "teacher"
+                    else format_weekday_schedule
+                )(name, first["weekday"], numerator_pairs, denominator_pairs),
+                thread_id,
+            )
+
+    def _handle_calendar(
+        self, command: str, argument: str, message: dict[str, Any]
+    ) -> None:
+        chat_id = int(message["chat"]["id"])
         thread_id = message.get("message_thread_id")
-        text = str(message.get("text", "")).strip()
-        if not text.startswith("/"):
-            return
-        command, _, argument = text.partition(" ")
-        command = command.split("@", 1)[0].casefold()
-        if command not in COMMANDS:
-            return
-
-        if command in {"/help", "/start"}:
+        user = message.get("from") or {}
+        user_id = int(user.get("id", 0))
+        if user_id <= 0 or user.get("is_bot") or message.get("sender_chat"):
             self.sender.send_message(
                 chat_id,
-                "<b>Команды расписания</b>\n"
-                "/setup — выбрать группу или преподавателя для чата или темы.\n"
-                "/today — расписание на сегодня с опубликованными заменами.\n"
-                "/tomorrow — расписание на завтра с опубликованными заменами.\n"
-                "/date DD.MM.YYYY — расписание на дату, например /date 16.09.2026.\n"
-                "/week — основное расписание без замен: оба варианта недели, "
-                "по сообщению на день. Ч — числитель, З — знаменатель; "
-                "суббота показывается при наличии пар.\n\n"
-                "<b>Настройки</b>\n"
-                "/autopost_on — присылать расписание на завтра после появления "
-                "файла замен, даже если для выбранной группы или преподавателя замен нет. "
-                "Повторно — только при изменении итогового расписания.\n"
-                "/autopost_off — отключить автоотправку.\n"
-                "/calendar — ваша ссылка календаря выбранной группы или преподавателя.\n"
-                "/calendar_format short — заголовки «Фамилия кабинет» только для вас.\n"
-                "/calendar_format full — вернуть длинные заголовки (по умолчанию).\n"
-                "/calendar_off — отозвать ваши ссылки календарей этого чата/темы.\n"
-                "/help — эта справка.\n\n"
-                "Настройки действуют в текущем чате или теме. "
-                "Менять их может любой участник. Формат календаря индивидуальный. "
-                "Расписание обновляется автоматически.\n"
-                "Частые повторы команд пропускаются. Дождитесь завершения ответа "
-                "перед повторным запросом.",
+                "Для личного календаря выполните команду от своего имени, "
+                "а не анонимно или от имени канала.",
                 thread_id,
             )
-            if command == "/help":
-                return
-        if command in {"/calendar", "/calendar_off", "/calendar_format"}:
-            user = message.get("from") or {}
-            user_id = int(user.get("id", 0))
-            if user_id <= 0 or user.get("is_bot") or message.get("sender_chat"):
-                self.sender.send_message(
-                    chat_id,
-                    "Для личного календаря выполните команду от своего имени, "
-                    "а не анонимно или от имени канала.",
-                    thread_id,
-                )
-                return
+            return
         if command == "/calendar_format":
-            title_format = argument.strip().casefold()
-            if title_format not in {"short", "full"}:
-                self.sender.send_message(
-                    chat_id,
-                    "/calendar_format short — «Фамилия кабинет», например «Зыбина 506б».\n"
-                    "/calendar_format full — длинные заголовки (по умолчанию).\n"
-                    "Настройка действует только на ваши личные ссылки из /calendar.",
-                    thread_id,
-                )
-                return
-            self.storage.set_calendar_format(user_id, title_format)
-            label = (
-                "«Фамилия кабинет»" if title_format == "short" else "длинные заголовки"
-            )
-            self.sender.send_message(
-                chat_id,
-                f"Ваш формат календаря: {label}. "
-                "Других пользователей это не затрагивает. "
-                "Подключать вашу подписку заново не нужно: изменения появятся "
-                "при обновлении календаря. Для старой общей ссылки получите "
-                "личную через /calendar.",
-                thread_id,
-            )
-            return
-        if command in {"/start", "/setup", "/group", "/groups"}:
-            self._send_setup(chat_id, thread_id)
-            return
-        binding = self.storage.get_binding(chat_id, thread_id)
-        if not binding:
-            self._send_setup(chat_id, thread_id)
-            return
-        name = str(binding["target_name"])
-        target_type = str(binding["target_type"])
-
-        now = dt.datetime.now(self.timezone)
-        if command == "/calendar":
-            if not self.config.calendar_public_url:
-                self.sender.send_message(
-                    chat_id,
-                    "Календарь пока не настроен на сервере. Нужен CALENDAR_PUBLIC_URL с HTTPS.",
-                    thread_id,
-                )
-                return
-            subscription = self.storage.calendar_subscription(
-                chat_id, thread_id, user_id
-            )
-            if subscription is None:
-                self._send_setup(chat_id, thread_id)
-                return
-            name = str(subscription["target_name"])
-            label = (
-                "Преподаватель"
-                if subscription["target_type"] == "teacher"
-                else "Группа"
-            )
-            url = f"{self.config.calendar_public_url}/calendar/{subscription['token']}.ics"
-            self.sender.send_message(
-                chat_id,
-                f"<b>{label}: {html.escape(name)}</b>\n"
-                "В этом календаре только выбранная группа или преподаватель.\n"
-                "Пары на завтра публикуются после обнаружения файла замен. "
-                "При изменении ваших пар календарь обновляется без дублей.\n"
-                "Это ваша личная ссылка. /calendar_format short — «Фамилия кабинет», "
-                "/calendar_format full — длинные заголовки.\n\n"
-                "iPhone: Календарь → Календари → Добавить календарь → "
-                "Добавить подписной календарь. Вставьте этот адрес:\n"
-                f"<code>{html.escape(url)}</code>\n\n"
-                "Google Calendar: в веб-версии Другие календари → Добавить по URL. "
-                "Используйте подписку, а не разовый импорт файла.\n"
-                "До первой публикации календарь может быть пустым. "
-                "Скорость обновления зависит от приложения.\n"
-                "Ссылка закреплена за этим выбором. После смены /setup запросите новую "
-                "через /calendar и удалите старую подписку в телефоне. "
-                "Ссылка даёт доступ к расписанию — передавайте её только намеренно.",
-                thread_id,
-            )
-        elif command == "/calendar_off":
+            self._set_calendar_format(user_id, argument, chat_id, thread_id)
+        elif command == "/calendar":
+            self._send_calendar(user_id, chat_id, thread_id)
+        else:
             self.storage.revoke_calendars(chat_id, thread_id, user_id)
             self.sender.send_message(
                 chat_id,
@@ -371,64 +375,47 @@ class TelegramHandlers:
                 "Удалите подписки в календаре телефона. /calendar выдаст новую ссылку.",
                 thread_id,
             )
-        elif command == "/today":
-            self._send_date(
-                chat_id, thread_id, name, now.date(), target_type=target_type
+
+    def handle_message(self, message: dict[str, Any]) -> None:
+        chat = message.get("chat") or {}
+        if "id" not in chat:
+            return
+        chat_id = int(chat["id"])
+        thread_id = message.get("message_thread_id")
+        command, argument = parse_command(str(message.get("text", "")))
+        if command not in COMMANDS:
+            return
+        if command in {"/help", "/start"}:
+            self._send_help(chat_id, thread_id)
+            if command == "/help":
+                return
+        if command in {"/start", "/setup", "/group", "/groups"}:
+            self._send_setup(chat_id, thread_id)
+            return
+        if command in {"/calendar", "/calendar_format", "/calendar_off"}:
+            self._handle_calendar(command, argument, message)
+            return
+        binding = self.storage.get_binding(chat_id, thread_id)
+        if binding is None:
+            self._send_setup(chat_id, thread_id)
+            return
+        name = str(binding["target_name"])
+        target_type = str(binding["target_type"])
+        now = dt.datetime.now(self.timezone)
+        if command in {"/today", "/tomorrow", "/date"}:
+            date = (
+                parse_flexible_date(argument)
+                if command == "/date"
+                else now.date() + dt.timedelta(days=command == "/tomorrow")
             )
-        elif command == "/tomorrow":
-            self._send_date(
-                chat_id,
-                thread_id,
-                name,
-                now.date() + dt.timedelta(days=1),
-                target_type=target_type,
-            )
-        elif command == "/date":
-            self._send_date(
-                chat_id,
-                thread_id,
-                name,
-                parse_flexible_date(argument),
-                target_type=target_type,
-            )
+            self._send_date(chat_id, thread_id, name, date, target_type=target_type)
         elif command == "/week":
-            monday = now.date() - dt.timedelta(days=now.weekday())
-            self.validate_semester()
-            snapshot = self.schedules.snapshot()
-            for day_offset in range(6):
-                first, _ = self._schedule(
-                    name,
-                    monday + dt.timedelta(days=day_offset),
-                    target_type=target_type,
-                    include_replacements=False,
-                    snapshot=snapshot,
-                )
-                second, _ = self._schedule(
-                    name,
-                    monday + dt.timedelta(days=day_offset + 7),
-                    target_type=target_type,
-                    include_replacements=False,
-                    snapshot=snapshot,
-                )
-                schedules = {first["week_type"]: first, second["week_type"]: second}
-                numerator_pairs = schedules["числитель"]["pairs"]
-                denominator_pairs = schedules["знаменатель"]["pairs"]
-                if day_offset == 5 and not (numerator_pairs or denominator_pairs):
-                    continue
-                self.sender.send_message(
-                    chat_id,
-                    (
-                        format_teacher_weekday_schedule
-                        if target_type == "teacher"
-                        else format_weekday_schedule
-                    )(name, first["weekday"], numerator_pairs, denominator_pairs),
-                    thread_id,
-                )
+            self._send_week(chat_id, thread_id, name, target_type, now)
         elif command == "/autopost_on":
             self.storage.set_autopost(chat_id, thread_id, True)
             self.sender.send_message(
                 chat_id,
-                f"Автоотправка включена для <b>{html.escape(name)}</b> в этой теме.",
+                f"Автоотправка включена для <b>{html.escape(name)}</b> в этом чате/теме.",
                 thread_id,
             )
         elif command == "/autopost_off":
@@ -466,16 +453,7 @@ class TelegramHandlers:
                 page = -1
             self._send_teacher_page(chat_id, thread_id, message_id, page)
             return
-        if data == "setup:groups":
-            self._update_setup_message(
-                chat_id,
-                thread_id,
-                message_id,
-                "Выбери курс, затем группу:",
-                _course_keyboard(),
-            )
-            return
-        if data == "courses":
+        if data in {"setup:groups", "courses"}:
             self._update_setup_message(
                 chat_id,
                 thread_id,

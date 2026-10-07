@@ -34,6 +34,60 @@ def parsed_course(_path: Path, course: int) -> dict[str, object]:
 
 
 class RepositoryRefreshTests(unittest.TestCase):
+    def test_failed_pdf_rebuild_preserves_cache_and_previous_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            repository = ScheduleRepository(storage, "https://example.invalid")
+            with (
+                patch(
+                    "app.schedule_service.list_public_files",
+                    return_value=source_files(),
+                ),
+                patch(
+                    "app.schedule_service.download_public_file",
+                    return_value=b"%PDF-1.4 old",
+                ),
+                patch(
+                    "app.schedule_service.parse_schedule_pdf", side_effect=parsed_course
+                ),
+            ):
+                repository.refresh()
+            previous = storage.load_cache()
+            with (
+                patch(
+                    "app.schedule_service.list_public_files",
+                    return_value=source_files("2026-02-02"),
+                ),
+                patch(
+                    "app.schedule_service.download_public_file",
+                    return_value=b"%PDF-1.4 broken",
+                ),
+                patch(
+                    "app.schedule_service.parse_schedule_pdf",
+                    side_effect=ValueError("bad table"),
+                ),
+                self.assertRaisesRegex(ValueError, "bad table"),
+            ):
+                repository.refresh()
+            self.assertEqual(storage.load_cache(), previous)
+            self.assertEqual(repository.cache, previous)
+            self.assertEqual(
+                (storage.data_dir / "source_pdfs/course_2.pdf").read_bytes(),
+                b"%PDF-1.4 old",
+            )
+            self.assertEqual(
+                list((storage.data_dir / "source_pdfs").glob("*.tmp.pdf")), []
+            )
+
+    def test_failed_json_write_keeps_previous_cache_and_removes_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            storage.save_cache({"groups": {}})
+            with self.assertRaises(TypeError):
+                storage.save_cache({"invalid": object()})
+            self.assertEqual(storage.load_cache(), {"groups": {}})
+            self.assertFalse(storage.cache_path.with_suffix(".tmp").exists())
+
     def test_only_changed_course_is_reparsed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = ScheduleRepository(

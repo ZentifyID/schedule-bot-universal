@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import http.client
 import io
 import logging
 import unittest
+import urllib.error
 import urllib.request
 import zipfile
 from typing import Self
@@ -39,6 +41,60 @@ def docx_with_xml(xml: bytes) -> bytes:
 
 
 class SecurityTests(unittest.TestCase):
+    def test_network_retries_only_transient_errors_and_closes_http_errors(self) -> None:
+        for code, calls in ((404, 1), (503, 2)):
+            body = io.BytesIO(b"error")
+            error = urllib.error.HTTPError(
+                "https://example.invalid", code, "error", {}, body
+            )
+            with (
+                self.subTest(code=code),
+                patch(
+                    "urllib.request.urlopen", side_effect=[error, FakeResponse(b"ok")]
+                ) as request,
+                patch("app.yandex_disk.time.sleep") as sleep,
+            ):
+                if code == 404:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        _read_url(
+                            urllib.request.Request("https://example.invalid"), 1, 100
+                        )
+                    sleep.assert_not_called()
+                else:
+                    self.assertEqual(
+                        _read_url(
+                            urllib.request.Request("https://example.invalid"), 1, 100
+                        ),
+                        b"ok",
+                    )
+                    sleep.assert_called_once_with(1)
+                self.assertEqual(request.call_count, calls)
+                self.assertTrue(body.closed)
+        with (
+            patch(
+                "urllib.request.urlopen",
+                side_effect=[
+                    http.client.IncompleteRead(b"partial"),
+                    FakeResponse(b"ok"),
+                ],
+            ),
+            patch("app.yandex_disk.time.sleep"),
+        ):
+            self.assertEqual(
+                _read_url(urllib.request.Request("https://example.invalid"), 1, 100),
+                b"ok",
+            )
+        with (
+            patch(
+                "urllib.request.urlopen", side_effect=TimeoutError("offline")
+            ) as request,
+            patch("app.yandex_disk.time.sleep") as sleep,
+            self.assertRaisesRegex(TimeoutError, "offline"),
+        ):
+            _read_url(urllib.request.Request("https://example.invalid"), 1, 100)
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 3])
+
     def test_download_rejects_insecure_direct_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsafe download URL"):
             download_public_file(

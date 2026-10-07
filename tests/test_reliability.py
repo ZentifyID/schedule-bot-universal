@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,6 +53,28 @@ class ReplacementConflictTests(unittest.TestCase):
 
 
 class TelegramErrorTests(unittest.TestCase):
+    def test_http_error_responses_are_closed_and_invalid_json_is_reported(self) -> None:
+        for content in (b"not json", b'{"ok": false, "description": "failed"}'):
+            body = io.BytesIO(content)
+            error = urllib.error.HTTPError(
+                "https://api.telegram.org", 500, "failed", {}, body
+            )
+            with (
+                self.subTest(content=content),
+                patch("app.telegram_api.urllib.request.urlopen", side_effect=error),
+                self.assertRaises(TelegramAPIError),
+            ):
+                TelegramAPI("test").request("sendMessage")
+            self.assertTrue(body.closed)
+        with (
+            patch(
+                "app.telegram_api.urllib.request.urlopen",
+                return_value=self.response([]),
+            ),
+            self.assertRaisesRegex(TelegramAPIError, "Invalid JSON response"),
+        ):
+            TelegramAPI("test").request("sendMessage")
+
     @staticmethod
     def response(payload: dict) -> io.BytesIO:
         return io.BytesIO(json.dumps(payload).encode())

@@ -8,11 +8,11 @@ from collections.abc import Callable
 from typing import Any
 
 from .config import Config
-from .replacement_service import ReplacementRepository, apply_replacements
+from .replacement_service import ReplacementRepository
+from .schedule_calculator import schedule_for_target
 from .schedule_formatter import format_schedule, format_teacher_schedule
 from .schedule_service import ScheduleRepository
 from .storage import Storage
-from .teacher_schedule import schedule_for_teacher
 from .telegram_api import TelegramAPIError
 from .telegram_queue import TelegramSendQueue
 from .yandex_disk import file_fingerprint
@@ -65,16 +65,47 @@ class AutopostService:
             replacement_item
         )
         legacy_fingerprint = "replacement:" + file_fingerprint(replacement_item)
+        snapshot = self.schedules.snapshot()
+        messages: dict[tuple[str, str], str | None] = {}
         for binding in bindings:
-            self._send_binding(
-                binding, target_date, replacements_by_group, legacy_fingerprint
-            )
+            kind, name = binding["target_type"], binding["target_name"]
+            key = (kind, name)
+            if key not in messages:
+                try:
+                    schedule = schedule_for_target(
+                        snapshot,
+                        kind,
+                        name,
+                        target_date,
+                        self.config.numerator_week_start,
+                        replacements_by_group,
+                    )
+                    messages[key] = (
+                        format_teacher_schedule(schedule)
+                        if kind == "teacher"
+                        else format_schedule(schedule)
+                    )
+                except Exception:
+                    logger.exception(
+                        "Autopost calculation failed for %s %s", kind, name
+                    )
+                    messages[key] = None
+            message = messages[key]
+            if message is not None:
+                self._send_binding(
+                    binding,
+                    target_date,
+                    message,
+                    replacements_by_group.get(name, []),
+                    legacy_fingerprint,
+                )
 
     def _send_binding(
         self,
         binding: Any,
         target_date: dt.date,
-        replacements_by_group: dict[str, list[dict[str, str]]],
+        message: str,
+        group_replacements: list[dict[str, str]],
         legacy_fingerprint: str,
     ) -> None:
         chat_id = int(binding["chat_id"])
@@ -82,41 +113,26 @@ class AutopostService:
         target_type = str(binding["target_type"])
         name = str(binding["target_name"])
         try:
-            group_replacements = (
-                replacements_by_group.get(name, []) if target_type == "group" else []
-            )
-            if target_type == "teacher":
-                schedule = schedule_for_teacher(
-                    self.schedules,
-                    name,
-                    target_date,
-                    self.config.numerator_week_start,
-                    replacements_by_group,
-                )
-                message = format_teacher_schedule(schedule)
-            else:
-                base = self.schedules.schedule_for(
-                    name, target_date, self.config.numerator_week_start
-                )
-                schedule = apply_replacements(base, group_replacements)
-                message = format_schedule(schedule)
             fingerprint = _schedule_fingerprint(message)
-            old_group_fingerprint = _legacy_group_fingerprint(group_replacements)
+            old_fingerprints = (
+                {
+                    _legacy_group_fingerprint(group_replacements),
+                    legacy_fingerprint,
+                }
+                if target_type == "group"
+                else set()
+            )
             date_key = target_date.isoformat()
             previous = self.storage.autopost_fingerprint(
                 chat_id, thread_id, name, date_key, target_type
-            )
-            old_fingerprints = (
-                {old_group_fingerprint, legacy_fingerprint}
-                if target_type == "group"
-                else set()
             )
             if previous == fingerprint or previous in old_fingerprints:
                 if previous != fingerprint:
                     self.storage.mark_autopost(
                         chat_id, thread_id, name, date_key, fingerprint, target_type
                     )
-                self.storage.record_autopost_success(chat_id, thread_id)
+                if binding["autopost_failures"] or binding["autopost_last_error"]:
+                    self.storage.record_autopost_success(chat_id, thread_id)
                 return
             self.sender.send_message(
                 chat_id,
@@ -127,7 +143,8 @@ class AutopostService:
             self.storage.mark_autopost(
                 chat_id, thread_id, name, date_key, fingerprint, target_type
             )
-            self.storage.record_autopost_success(chat_id, thread_id)
+            if binding["autopost_failures"] or binding["autopost_last_error"]:
+                self.storage.record_autopost_success(chat_id, thread_id)
             logger.info(
                 "Autopost sent chat_id=%s thread_id=%s target=%s:%s date=%s",
                 chat_id,
