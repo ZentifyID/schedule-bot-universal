@@ -20,13 +20,14 @@ from app.pdf_parser import (
 from app.replacement_service import apply_replacements
 from app.schedule_service import (
     WEEKDAYS_BY_NUMBER,
+    ScheduleSnapshot,
     _select_course_files,
     _semester_key,
     parse_flexible_date,
     week_type_for_date,
 )
 from app.storage import Storage
-from app.teacher_schedule import available_teachers
+from app.teacher_schedule import available_teachers, schedule_for_teacher
 
 
 class CoreTests(unittest.TestCase):
@@ -254,5 +255,27 @@ class RealPdfTests(unittest.TestCase):
             self.assertEqual(total, 83)
             cache = type("Cache", (), {"cache": {"groups": all_groups}})()
             self.assertNotIn("Х", available_teachers(cache))
+            schedules = ScheduleSnapshot({"groups": all_groups})
+            numerator_start = dt.date(2026, 2, 2)
+            for date, group in (
+                (dt.date(2026, 10, 1), "22 иск"),
+                (dt.date(2026, 10, 8), "21 ис"),
+            ):
+                result = schedule_for_teacher(
+                    schedules, "Ершов Д. Д.", date, numerator_start
+                )
+                affected = [
+                    lesson
+                    for lesson in result["pairs"]
+                    if lesson["group"] in {"21 ис", "22 иск"}
+                ]
+                self.assertEqual(
+                    [(lesson["group"], lesson["pair"]) for lesson in affected],
+                    [(group, 2)],
+                )
+                self.assertEqual(
+                    affected[0]["subject"], "Основы проектирования баз данных"
+                )
+                self.assertEqual(affected[0]["room"], "111 каб.")
         else:
             self.assertEqual(total, 82)

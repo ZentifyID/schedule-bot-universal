@@ -6,7 +6,7 @@ from typing import Any
 
 import pdfplumber
 
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 WEEKDAYS = [
     "понедельник",
     "вторник",
@@ -29,7 +29,8 @@ PAIR_TIMES_DISPLAY = {
 }
 TABLE_SETTINGS = {
     "vertical_strategy": "lines",
-    "horizontal_strategy": "lines",
+    # Background rectangles can split a merged time cell at the week boundary.
+    "horizontal_strategy": "lines_strict",
     "snap_tolerance": 3,
     "join_tolerance": 3,
     "intersection_tolerance": 3,
