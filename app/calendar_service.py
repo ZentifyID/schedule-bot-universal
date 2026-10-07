@@ -107,6 +107,21 @@ def _short_title(event: dict[str, str], name: str, target_type: str) -> str:
     return "/".join(surnames) or "Пара"
 
 
+def _format_location(value: str) -> str:
+    location = " ".join(value.split())
+    room = re.fullmatch(
+        r"(\d{2,4})\s*([а-яёa-z]?)\s*(?:каб\.?)?", location, re.IGNORECASE
+    )
+    if room:
+        return f"{room[1]}{room[2].lower()} каб."
+    floor = re.fullmatch(r"(кор|ков)\.?\s*(\d+)\s*этаж\.?", location, re.IGNORECASE)
+    if floor:
+        return f"{floor[1].lower()}. {floor[2]} этаж"
+    if re.fullmatch(r"(?:спорт|мпорт)\.?\s*з+ал", location, re.IGNORECASE):
+        return "спортзал"
+    return location
+
+
 def render_calendar(
     name: str,
     days: list[Any],
@@ -147,7 +162,7 @@ def render_calendar(
                 lines.append("DESCRIPTION:" + _text(event["description"]))
             lines.extend(
                 [
-                    "LOCATION:" + _text(event["location"]),
+                    "LOCATION:" + _text(_format_location(event["location"])),
                     "STATUS:" + event["status"],
                     "END:VEVENT",
                 ]

@@ -291,8 +291,8 @@ class CalendarTests(unittest.TestCase):
         short = self.service.feed(token, self.now(10))
         self.assertIn("SUMMARY:Иванова\r\n", short.decode())
         self.assertIn("SUMMARY:Петров\r\n", short.decode())
-        self.assertIn(b"LOCATION:101\r\n", short)
-        self.assertIn(b"LOCATION:102\r\n", short)
+        self.assertIn("LOCATION:101 каб.\r\n", short.decode())
+        self.assertIn("LOCATION:102 каб.\r\n", short.decode())
         self.assertNotIn(b"DESCRIPTION:", short)
         self.assertIn(b"SEQUENCE:1", short)
         self.assertEqual(self.service.feed(other, self.now(10)), original)
@@ -320,13 +320,13 @@ class CalendarTests(unittest.TestCase):
                 self.assertIn(value, restored_block)
 
     def test_short_titles_examples_teacher_and_missing_data(self) -> None:
-        for teacher, room, expected in (
-            ("Зыбина О.Ю.", "506б", "Зыбина"),
-            ("Плохотнюк А.А.", "506а", "Плохотнюк"),
-            ("Семин И.И.", "112", "Семин"),
-            ("Харитонова М.В.", "спорт.зал", "Харитонова"),
-            ("Иванова И.И./Петров П.П.", "101", "Иванова/Петров"),
-            ("", "", "Пара"),
+        for teacher, room, expected, expected_room in (
+            ("Зыбина О.Ю.", "506б", "Зыбина", "506б каб."),
+            ("Плохотнюк А.А.", "506а", "Плохотнюк", "506а каб."),
+            ("Семин И.И.", "112", "Семин", "112 каб."),
+            ("Харитонова М.В.", "спорт.зал", "Харитонова", "спортзал"),
+            ("Иванова И.И./Петров П.П.", "101", "Иванова/Петров", "101 каб."),
+            ("", "", "Пара", ""),
         ):
             with self.subTest(teacher=teacher):
                 events = calendar_events(
@@ -359,7 +359,7 @@ class CalendarTests(unittest.TestCase):
                     .replace("\r\n ", "")
                 )
                 self.assertIn(f"SUMMARY:{expected}\r\n", content)
-                self.assertIn(f"LOCATION:{room}\r\n", content)
+                self.assertIn(f"LOCATION:{expected_room}\r\n", content)
                 self.assertNotIn("DESCRIPTION:", content)
         self.storage.set_calendar_format(5, "short")
         self.storage.set_binding(42, 8, "Иванова И.И.", "teacher")
@@ -367,12 +367,12 @@ class CalendarTests(unittest.TestCase):
         self.service.run(self.now(10))
         content = self.service.feed(token, self.now(10)).decode().replace("\r\n ", "")
         self.assertIn("SUMMARY:Иванова\r\n", content)
-        self.assertIn("LOCATION:101\r\n", content)
-        self.assertIn("LOCATION:201\r\n", content)
+        self.assertIn("LOCATION:101 каб.\r\n", content)
+        self.assertIn("LOCATION:201 каб.\r\n", content)
         self.assertNotIn("DESCRIPTION:", content)
         self.assertNotIn("SUMMARY:Петров", content)
 
-    def test_existing_short_subscriptions_refresh_once_without_changing_full(
+    def test_existing_subscriptions_refresh_once_and_keep_formats(
         self,
     ) -> None:
         short_token = self.storage.calendar_subscription(42, None, 5)["token"]
@@ -391,10 +391,17 @@ class CalendarTests(unittest.TestCase):
         original_short = self.service.feed(short_token, self.now(10))
         self.service.storage = Storage(self.config.data_dir)
         short = self.service.feed(short_token, self.now(10))
-        self.assertIn(b"SEQUENCE:4\r\n", short)
+        self.assertIn(b"SEQUENCE:5\r\n", short)
         self.assertNotEqual(short, original_short)
         self.assertNotIn(b"DESCRIPTION:", short)
-        self.assertEqual(self.service.feed(full_token, self.now(10)), original_full)
+        full = self.service.feed(full_token, self.now(10))
+        self.assertIn(b"SEQUENCE:3\r\n", full)
+        for before, after in zip(
+            event_blocks(original_full), event_blocks(full), strict=True
+        ):
+            for line in before.splitlines():
+                if not line.startswith(("SEQUENCE:", "DTSTAMP:", "LAST-MODIFIED:")):
+                    self.assertIn(line, after)
         self.assertEqual(
             self.service.storage.calendar_subscription(42, None, 5)["token"],
             short_token,
@@ -403,11 +410,96 @@ class CalendarTests(unittest.TestCase):
             stamp = db.execute(
                 "SELECT updated_at FROM calendar_preferences WHERE user_id=5"
             ).fetchone()[0]
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
         self.assertGreater(stamp, "20260101T000000Z")
         self.service.storage = Storage(self.config.data_dir)
         self.assertEqual(self.service.feed(short_token, self.now(10)), short)
-        self.assertEqual(self.service.feed(full_token, self.now(10)), original_full)
+        self.assertEqual(self.service.feed(full_token, self.now(10)), full)
+
+    def test_location_upgrade_keeps_preferences_urls_and_cancellations(self) -> None:
+        token = self.storage.calendar_subscription(42, None, 5)["token"]
+        self.storage.set_calendar_format(5, "short")
+        self.service.run(self.now(10))
+        with self.storage.connect() as db:
+            preference = tuple(
+                db.execute(
+                    "SELECT * FROM calendar_preferences WHERE user_id=5"
+                ).fetchone()
+            )
+            day = db.execute(
+                "SELECT * FROM calendar_days ORDER BY target_date LIMIT 1"
+            ).fetchone()
+            events = json.loads(day["events"])
+            events[0]["status"] = "CANCELLED"
+            events[0]["location"] = "506 б каб."
+            db.execute(
+                "UPDATE calendar_days SET events=? WHERE target_date=?",
+                (json.dumps(events), day["target_date"]),
+            )
+            db.execute("PRAGMA user_version=1")
+        self.service.storage = Storage(self.config.data_dir)
+        short = self.service.feed(token, self.now(10))
+        legacy = self.feed(10)
+        self.assertIn(b"SEQUENCE:2\r\n", short)
+        self.assertIn(b"SEQUENCE:1\r\n", legacy)
+        for content in (short, legacy):
+            cancelled = next(
+                block for block in event_blocks(content) if "STATUS:CANCELLED" in block
+            )
+            self.assertIn("LOCATION:506б каб.\r\n", cancelled)
+            self.assertIn("UID:" + events[0]["uid"], cancelled)
+        with self.service.storage.connect() as db:
+            self.assertEqual(
+                tuple(
+                    db.execute(
+                        "SELECT * FROM calendar_preferences WHERE user_id=5"
+                    ).fetchone()
+                ),
+                preference,
+            )
+        self.assertEqual(
+            self.service.storage.calendar_subscription(42, None, 5)["token"], token
+        )
+        self.service.storage = Storage(self.config.data_dir)
+        self.assertEqual(self.service.feed(token, self.now(10)), short)
+        self.assertEqual(self.feed(10), legacy)
+        self.service.run(self.now(10))
+        # Restore the manually cancelled lesson: subsequent source updates still work.
+        self.assertIn(b"SEQUENCE:3\r\n", self.service.feed(token, self.now(10)))
+
+    def test_location_formatting_in_both_formats(self) -> None:
+        self.service.run(self.now(10))
+        _, days = self.storage.calendar_feed_data(self.token, DAY, DAY)
+        day = dict(days[0])
+        events = json.loads(day["events"])
+        for room, expected in (
+            ("506 б каб.", "506б каб."),
+            ("506 а", "506а каб."),
+            ("506Бкаб", "506б каб."),
+            ("506б каб.", "506б каб."),
+            ("112", "112 каб."),
+            ("112каб.", "112 каб."),
+            ("кор.4этаж", "кор. 4 этаж"),
+            ("кор. 4 этаж", "кор. 4 этаж"),
+            ("ков.2 этаж", "ков. 2 этаж"),
+            ("спорт.зал", "спортзал"),
+            ("спорт зал", "спортзал"),
+            ("спорт.ззал", "спортзал"),
+            ("спортзал", "спортзал"),
+            ("", ""),
+            ("лекторий", "лекторий"),
+            ("106/318 каб.", "106/318 каб."),
+            ("А;1", "А\\;1"),
+        ):
+            events[0]["location"] = room
+            day["events"] = json.dumps(events[:1])
+            for title_format in ("full", "short"):
+                with self.subTest(room=room, title_format=title_format):
+                    content = render_calendar(
+                        "11 ис", [day], title_format=title_format
+                    ).decode()
+                    self.assertIn(f"LOCATION:{expected}\r\n", content)
+                    self.assertEqual(json.loads(day["events"])[0]["location"], room)
 
     def test_legacy_database_migration_keeps_urls_and_is_idempotent(self) -> None:
         directory = self.config.data_dir / "legacy"
