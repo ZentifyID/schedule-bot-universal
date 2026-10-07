@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -47,7 +46,6 @@ class Config:
     telegram_queue_size: int = 1000
     calendar_public_url: str = ""
     calendar_port: int = 8765
-    calendar_publish_time: dt.time = dt.time(22, 0)
 
     @classmethod
     def from_env(cls) -> Config:
@@ -78,10 +76,6 @@ class Config:
             raise ValueError(
                 "CALENDAR_PUBLIC_URL must be an HTTPS origin without a path"
             )
-        calendar_time = os.getenv("CALENDAR_PUBLISH_TIME", "22:00").strip()
-        if not re.fullmatch(r"\d{2}:\d{2}", calendar_time):
-            raise ValueError("CALENDAR_PUBLISH_TIME must be HH:MM")
-        publish_time = dt.time.fromisoformat(calendar_time)
         calendar_port = int(os.getenv("CALENDAR_PORT", "8765"))
         if not 1 <= calendar_port <= 65535:
             raise ValueError("CALENDAR_PORT must be between 1 and 65535")
@@ -106,7 +100,6 @@ class Config:
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
             calendar_public_url=calendar_url,
             calendar_port=calendar_port,
-            calendar_publish_time=publish_time,
             telegram_messages_per_second=max(
                 1.0,
                 min(float(os.getenv("TELEGRAM_MESSAGES_PER_SECOND", "20")), 25.0),

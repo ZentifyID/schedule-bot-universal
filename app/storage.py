@@ -62,7 +62,14 @@ class Storage:
                     thread_id INTEGER NOT NULL,
                     target_type TEXT NOT NULL,
                     target_name TEXT NOT NULL,
-                    UNIQUE(chat_id, thread_id, target_type, target_name)
+                    user_id INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(chat_id, thread_id, target_type, target_name, user_id)
+                );
+                CREATE TABLE IF NOT EXISTS calendar_preferences (
+                    user_id INTEGER PRIMARY KEY,
+                    title_format TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS calendar_days (
                     target_type TEXT NOT NULL,
@@ -79,6 +86,24 @@ class Storage:
                 db, "bindings", "autopost_failures", "INTEGER NOT NULL DEFAULT 0"
             )
             self._ensure_column(db, "bindings", "autopost_last_error", "TEXT")
+            if "user_id" not in self._columns(db, "calendar_subscriptions"):
+                db.execute("BEGIN")
+                db.execute("ALTER TABLE calendar_subscriptions RENAME TO old_calendars")
+                db.execute("""
+                    CREATE TABLE calendar_subscriptions (
+                        token TEXT PRIMARY KEY, chat_id INTEGER NOT NULL,
+                        thread_id INTEGER NOT NULL, target_type TEXT NOT NULL,
+                        target_name TEXT NOT NULL, user_id INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(chat_id, thread_id, target_type, target_name, user_id)
+                    )
+                """)
+                # Existing shared URLs remain valid and keep their default long titles.
+                db.execute("""
+                    INSERT INTO calendar_subscriptions
+                    SELECT token, chat_id, thread_id, target_type, target_name, 0
+                    FROM old_calendars
+                """)
+                db.execute("DROP TABLE old_calendars")
             if "group_name" in self._columns(db, "bindings"):
                 db.execute("ALTER TABLE bindings RENAME TO old_bindings")
                 db.execute("""
@@ -189,7 +214,7 @@ class Storage:
             return db.execute("SELECT * FROM bindings WHERE autopost=1").fetchall()
 
     def calendar_subscription(
-        self, chat_id: int, thread_id: int | None
+        self, chat_id: int, thread_id: int | None, user_id: int = 0
     ) -> sqlite3.Row | None:
         """Pin a URL to the selected target, never to a mutable chat binding."""
         with self.connect() as db:
@@ -204,22 +229,44 @@ class Storage:
                 thread_id or 0,
                 binding["target_type"],
                 binding["target_name"],
+                user_id,
             )
             db.execute(
-                "INSERT OR IGNORE INTO calendar_subscriptions VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO calendar_subscriptions VALUES (?, ?, ?, ?, ?, ?)",
                 (secrets.token_hex(24), *key),
             )
             return db.execute(
                 "SELECT * FROM calendar_subscriptions WHERE chat_id=? AND thread_id=? "
-                "AND target_type=? AND target_name=?",
+                "AND target_type=? AND target_name=? AND user_id=?",
                 key,
             ).fetchone()
 
-    def revoke_calendars(self, chat_id: int, thread_id: int | None) -> None:
+    def revoke_calendars(
+        self, chat_id: int, thread_id: int | None, user_id: int = 0
+    ) -> None:
         with self.connect() as db:
             db.execute(
-                "DELETE FROM calendar_subscriptions WHERE chat_id=? AND thread_id=?",
-                (chat_id, thread_id or 0),
+                "DELETE FROM calendar_subscriptions WHERE chat_id=? AND thread_id=? AND user_id=?",
+                (chat_id, thread_id or 0, user_id),
+            )
+
+    def set_calendar_format(self, user_id: int, title_format: str) -> None:
+        if user_id <= 0 or title_format not in {"short", "full"}:
+            raise ValueError("Invalid calendar user or title format")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute(
+                "SELECT * FROM calendar_preferences WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if title_format == (previous["title_format"] if previous else "full"):
+                return
+            revision = int(previous["revision"]) + 1 if previous else 1
+            stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            db.execute(
+                "INSERT INTO calendar_preferences VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET title_format=excluded.title_format, "
+                "revision=excluded.revision, updated_at=excluded.updated_at",
+                (user_id, title_format, revision, stamp),
             )
 
     def calendar_targets(self) -> list[sqlite3.Row]:
@@ -270,7 +317,12 @@ class Storage:
     ) -> tuple[sqlite3.Row, list[sqlite3.Row]] | None:
         with self.connect() as db:
             subscription = db.execute(
-                "SELECT * FROM calendar_subscriptions WHERE token=?", (token,)
+                "SELECT s.*, COALESCE(p.title_format, 'full') AS title_format, "
+                "COALESCE(p.revision, 0) AS title_revision, "
+                "COALESCE(p.updated_at, '') AS title_updated_at "
+                "FROM calendar_subscriptions s LEFT JOIN calendar_preferences p "
+                "ON s.user_id=p.user_id WHERE s.token=?",
+                (token,),
             ).fetchone()
             if subscription is None:
                 return None

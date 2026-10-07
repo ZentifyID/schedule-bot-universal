@@ -17,7 +17,7 @@ from .pdf_parser import PAIR_TIMES_DISPLAY
 from .replacement_service import ReplacementRepository, apply_replacements
 from .schedule_service import ScheduleRepository
 from .storage import Storage
-from .teacher_schedule import correct_teacher_name, schedule_for_teacher
+from .teacher_schedule import correct_teacher_name, schedule_for_teacher, teacher_names
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,26 @@ def calendar_events(
     return events
 
 
-def render_calendar(name: str, days: list[Any]) -> bytes:
+def _short_title(event: dict[str, str], name: str, target_type: str) -> str:
+    teacher = (
+        name
+        if target_type == "teacher"
+        else (event["description"].partition("Преподаватель: ")[2].split("\n", 1)[0])
+    )
+    surnames = dict.fromkeys(person.split()[0] for person in teacher_names(teacher))
+    surname = "/".join(surnames) or "Пара"
+    return f"{surname} {event['location']}".strip()
+
+
+def render_calendar(
+    name: str,
+    days: list[Any],
+    *,
+    target_type: str = "group",
+    title_format: str = "full",
+    revision: int = 0,
+    updated_at: str = "",
+) -> bytes:
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -107,17 +126,25 @@ def render_calendar(name: str, days: list[Any]) -> bytes:
     ]
     for day in days:
         for event in json.loads(day["events"]):
+            short = title_format == "short"
+            summary = (
+                _short_title(event, name, target_type) if short else event["summary"]
+            )
+            description = event["description"]
+            if short:
+                description += f"\nЗанятие: {event['summary']}"
+            stamp = max(day["updated_at"], updated_at)
             lines.extend(
                 [
                     "BEGIN:VEVENT",
                     "UID:" + event["uid"],
-                    "DTSTAMP:" + day["updated_at"],
-                    "LAST-MODIFIED:" + day["updated_at"],
-                    "SEQUENCE:" + str(day["sequence"]),
+                    "DTSTAMP:" + stamp,
+                    "LAST-MODIFIED:" + stamp,
+                    "SEQUENCE:" + str(day["sequence"] + revision),
                     "DTSTART:" + event["start"],
                     "DTEND:" + event["end"],
-                    "SUMMARY:" + _text(event["summary"]),
-                    "DESCRIPTION:" + _text(event["description"]),
+                    "SUMMARY:" + _text(summary),
+                    "DESCRIPTION:" + _text(description),
                     "LOCATION:" + _text(event["location"]),
                     "STATUS:" + event["status"],
                     "END:VEVENT",
@@ -155,15 +182,17 @@ class CalendarService:
             return
         self.validate_semester()
         schedules = self.schedules.snapshot()
-        dates = [now.date()]
-        if now.time() >= self.config.calendar_publish_time:
-            dates.append(now.date() + dt.timedelta(days=1))
+        dates = [now.date(), now.date() + dt.timedelta(days=1)]
         for date in dates:
             if self._stop.is_set():
                 return
+            if date.weekday() == 6:
+                continue
             try:
                 item = self.replacements.find_for_date(date)
-                by_group = self.replacements.replacements_for_item(item) if item else {}
+                if item is None:
+                    continue
+                by_group = self.replacements.replacements_for_item(item)
             except Exception:
                 # An unavailable source is not the same as an absent replacement file.
                 logger.exception("Calendar replacements unavailable for %s", date)
@@ -196,16 +225,21 @@ class CalendarService:
 
     def feed(self, token: str, now: dt.datetime) -> bytes | None:
         now = now.astimezone(self.timezone)
-        last_date = now.date()
-        if now.time() >= self.config.calendar_publish_time:
-            last_date += dt.timedelta(days=1)
+        last_date = now.date() + dt.timedelta(days=1)
         data = self.storage.calendar_feed_data(
             token, now.date() - dt.timedelta(days=30), last_date
         )
         if data is None:
             return None
         subscription, days = data
-        return render_calendar(subscription["target_name"], days)
+        return render_calendar(
+            subscription["target_name"],
+            days,
+            target_type=subscription["target_type"],
+            title_format=subscription["title_format"],
+            revision=subscription["title_revision"],
+            updated_at=subscription["title_updated_at"],
+        )
 
     def start(self) -> None:
         if not self.config.calendar_public_url or self._server is not None:
@@ -278,10 +312,9 @@ class CalendarService:
                 targets = self.storage.calendar_targets()
                 window = (
                     now.date(),
-                    now.time() >= self.config.calendar_publish_time,
                     tuple((row["target_type"], row["target_name"]) for row in targets),
                 )
-                # Check the 22:00 boundary and new subscriptions every 30 seconds;
+                # Check new subscriptions every 30 seconds;
                 # poll external replacement sources only at their configured interval.
                 if window != last_window or time.monotonic() >= next_check:
                     self.run(now)

@@ -261,17 +261,56 @@ class TelegramHandlers:
                 "файла замен, даже если для выбранной группы или преподавателя замен нет. "
                 "Повторно — только при изменении итогового расписания.\n"
                 "/autopost_off — отключить автоотправку.\n"
-                "/calendar — ссылка календаря выбранной группы или преподавателя.\n"
-                "/calendar_off — отозвать все ссылки календарей этого чата/темы.\n"
+                "/calendar — ваша ссылка календаря выбранной группы или преподавателя.\n"
+                "/calendar_format short — заголовки «Фамилия кабинет» только для вас.\n"
+                "/calendar_format full — вернуть длинные заголовки (по умолчанию).\n"
+                "/calendar_off — отозвать ваши ссылки календарей этого чата/темы.\n"
                 "/help — эта справка.\n\n"
                 "Настройки действуют в текущем чате или теме. "
-                "Менять их может любой участник. Расписание обновляется автоматически.\n"
+                "Менять их может любой участник. Формат календаря индивидуальный. "
+                "Расписание обновляется автоматически.\n"
                 "Частые повторы команд пропускаются. Дождитесь завершения ответа "
                 "перед повторным запросом.",
                 thread_id,
             )
             if command == "/help":
                 return
+        if command in {"/calendar", "/calendar_off", "/calendar_format"}:
+            user = message.get("from") or {}
+            user_id = int(user.get("id", 0))
+            if user_id <= 0 or user.get("is_bot") or message.get("sender_chat"):
+                self.sender.send_message(
+                    chat_id,
+                    "Для личного календаря выполните команду от своего имени, "
+                    "а не анонимно или от имени канала.",
+                    thread_id,
+                )
+                return
+        if command == "/calendar_format":
+            title_format = argument.strip().casefold()
+            if title_format not in {"short", "full"}:
+                self.sender.send_message(
+                    chat_id,
+                    "/calendar_format short — «Фамилия кабинет», например «Зыбина 506б».\n"
+                    "/calendar_format full — длинные заголовки (по умолчанию).\n"
+                    "Настройка действует только на ваши личные ссылки из /calendar.",
+                    thread_id,
+                )
+                return
+            self.storage.set_calendar_format(user_id, title_format)
+            label = (
+                "«Фамилия кабинет»" if title_format == "short" else "длинные заголовки"
+            )
+            self.sender.send_message(
+                chat_id,
+                f"Ваш формат календаря: {label}. "
+                "Других пользователей это не затрагивает. "
+                "Подключать вашу подписку заново не нужно: изменения появятся "
+                "при обновлении календаря. Для старой общей ссылки получите "
+                "личную через /calendar.",
+                thread_id,
+            )
+            return
         if command in {"/start", "/setup", "/group", "/groups"}:
             self._send_setup(chat_id, thread_id)
             return
@@ -291,7 +330,9 @@ class TelegramHandlers:
                     thread_id,
                 )
                 return
-            subscription = self.storage.calendar_subscription(chat_id, thread_id)
+            subscription = self.storage.calendar_subscription(
+                chat_id, thread_id, user_id
+            )
             if subscription is None:
                 self._send_setup(chat_id, thread_id)
                 return
@@ -306,8 +347,10 @@ class TelegramHandlers:
                 chat_id,
                 f"<b>{label}: {html.escape(name)}</b>\n"
                 "В этом календаре только выбранная группа или преподаватель.\n"
-                f"Пары на завтра публикуются после {self.config.calendar_publish_time:%H:%M} "
-                f"({html.escape(self.config.timezone)}). Поздние замены обновляются автоматически.\n\n"
+                "Пары на завтра публикуются после обнаружения файла замен. "
+                "При изменении ваших пар календарь обновляется без дублей.\n"
+                "Это ваша личная ссылка. /calendar_format short — «Фамилия кабинет», "
+                "/calendar_format full — длинные заголовки.\n\n"
                 "iPhone: Календарь → Календари → Добавить календарь → "
                 "Добавить подписной календарь. Вставьте этот адрес:\n"
                 f"<code>{html.escape(url)}</code>\n\n"
@@ -321,10 +364,10 @@ class TelegramHandlers:
                 thread_id,
             )
         elif command == "/calendar_off":
-            self.storage.revoke_calendars(chat_id, thread_id)
+            self.storage.revoke_calendars(chat_id, thread_id, user_id)
             self.sender.send_message(
                 chat_id,
-                "Ссылки календарей этого чата/темы отозваны. "
+                "Ваши личные ссылки календарей этого чата/темы отозваны. "
                 "Удалите подписки в календаре телефона. /calendar выдаст новую ссылку.",
                 thread_id,
             )

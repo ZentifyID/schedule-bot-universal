@@ -17,6 +17,16 @@ def message(text: str, user: int = 1, chat: int = 1, thread: int = 0) -> dict:
 
 
 class CommandGuardTests(unittest.TestCase):
+    def test_calendar_format_can_switch_without_duplicate_suppression(self) -> None:
+        guard = CommandGuard()
+        key = guard.admit(message("/calendar_format short"), 0)
+        self.assertIsNotNone(key)
+        guard.finish(key)
+        key = guard.admit(message("/calendar_format full"), 1)
+        self.assertIsNotNone(key)
+        guard.finish(key)
+        self.assertIsNone(guard.admit(message("/calendar_format full"), 1.5))
+
     def test_burst_refills_and_users_are_independent(self) -> None:
         guard = CommandGuard()
         for command in ("/help", "/start", "/setup"):
