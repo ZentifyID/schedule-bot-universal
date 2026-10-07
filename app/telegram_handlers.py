@@ -230,7 +230,7 @@ class TelegramHandlers:
             "Повторно — только при изменении итогового расписания.\n"
             "/autopost_off — отключить автоотправку.\n"
             "/calendar — ваша ссылка календаря выбранной группы или преподавателя.\n"
-            "/calendar_format short — заголовки «Фамилия кабинет» только для вас.\n"
+            "/calendar_format short — только фамилия, без описания, только для вас.\n"
             "/calendar_format full — вернуть длинные заголовки (по умолчанию).\n"
             "/calendar_off — отозвать ваши ссылки календарей этого чата/темы.\n"
             "/help — эта справка.\n\n"
@@ -251,14 +251,19 @@ class TelegramHandlers:
         if title_format not in {"short", "full"}:
             self.sender.send_message(
                 chat_id,
-                "/calendar_format short — «Фамилия кабинет», например «Зыбина 506б».\n"
+                "/calendar_format short — только фамилия, например «Зыбина», без описания.\n"
+                "Кабинет остаётся в месте проведения.\n"
                 "/calendar_format full — длинные заголовки (по умолчанию).\n"
                 "Настройка действует только на ваши личные ссылки из /calendar.",
                 thread_id,
             )
             return
         self.storage.set_calendar_format(user_id, title_format)
-        label = "«Фамилия кабинет»" if title_format == "short" else "длинные заголовки"
+        label = (
+            "только фамилия, без описания"
+            if title_format == "short"
+            else "длинные заголовки"
+        )
         self.sender.send_message(
             chat_id,
             f"Ваш формат календаря: {label}. "
@@ -292,7 +297,7 @@ class TelegramHandlers:
             "В этом календаре только выбранная группа или преподаватель.\n"
             "Пары на завтра публикуются после обнаружения файла замен. "
             "При изменении ваших пар календарь обновляется без дублей.\n"
-            "Это ваша личная ссылка. /calendar_format short — «Фамилия кабинет», "
+            "Это ваша личная ссылка. /calendar_format short — только фамилия, без описания, "
             "/calendar_format full — длинные заголовки.\n\n"
             "iPhone: Календарь → Календари → Добавить календарь → "
             "Добавить подписной календарь. Вставьте этот адрес:\n"

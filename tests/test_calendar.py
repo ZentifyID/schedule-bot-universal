@@ -289,9 +289,11 @@ class CalendarTests(unittest.TestCase):
         self.storage.set_calendar_format(5, "short")
         self.service.storage = Storage(self.config.data_dir)
         short = self.service.feed(token, self.now(10))
-        self.assertIn("SUMMARY:Иванова 101", short.decode())
-        self.assertIn("SUMMARY:Петров 102", short.decode())
-        self.assertIn("Занятие: 1. Алгебра", short.decode())
+        self.assertIn("SUMMARY:Иванова\r\n", short.decode())
+        self.assertIn("SUMMARY:Петров\r\n", short.decode())
+        self.assertIn(b"LOCATION:101\r\n", short)
+        self.assertIn(b"LOCATION:102\r\n", short)
+        self.assertNotIn(b"DESCRIPTION:", short)
         self.assertIn(b"SEQUENCE:1", short)
         self.assertEqual(self.service.feed(other, self.now(10)), original)
         self.assertEqual(self.feed(10), original)  # Legacy shared link stays long.
@@ -300,24 +302,30 @@ class CalendarTests(unittest.TestCase):
         self.storage.set_calendar_format(5, "full")
         restored = self.service.feed(token, self.now(10))
         self.assertIn("SUMMARY:1. Алгебра", restored.decode())
+        self.assertIn(b"DESCRIPTION:", restored)
         self.assertIn(b"SEQUENCE:2", restored)
-        self.assertEqual(
-            [
-                block.split("UID:")[1].split("\r\n")[0]
-                for block in event_blocks(original)
-            ],
-            [
-                block.split("UID:")[1].split("\r\n")[0]
-                for block in event_blocks(restored)
-            ],
-        )
+        for original_block, short_block, restored_block in zip(
+            event_blocks(original),
+            event_blocks(short),
+            event_blocks(restored),
+            strict=True,
+        ):
+            for field in ("UID:", "DTSTART:", "DTEND:", "LOCATION:"):
+                value = next(
+                    line
+                    for line in original_block.splitlines()
+                    if line.startswith(field)
+                )
+                self.assertIn(value, short_block)
+                self.assertIn(value, restored_block)
 
     def test_short_titles_examples_teacher_and_missing_data(self) -> None:
         for teacher, room, expected in (
-            ("Зыбина О.Ю.", "506б", "Зыбина 506б"),
-            ("Плохотнюк А.А.", "506а", "Плохотнюк 506а"),
-            ("Семин И.И.", "112", "Семин 112"),
-            ("Иванова И.И./Петров П.П.", "101", "Иванова/Петров 101"),
+            ("Зыбина О.Ю.", "506б", "Зыбина"),
+            ("Плохотнюк А.А.", "506а", "Плохотнюк"),
+            ("Семин И.И.", "112", "Семин"),
+            ("Харитонова М.В.", "спорт.зал", "Харитонова"),
+            ("Иванова И.И./Петров П.П.", "101", "Иванова/Петров"),
             ("", "", "Пара"),
         ):
             with self.subTest(teacher=teacher):
@@ -351,16 +359,55 @@ class CalendarTests(unittest.TestCase):
                     .replace("\r\n ", "")
                 )
                 self.assertIn(f"SUMMARY:{expected}\r\n", content)
-                self.assertIn("Занятие: 1. Предмет", content)
+                self.assertIn(f"LOCATION:{room}\r\n", content)
+                self.assertNotIn("DESCRIPTION:", content)
         self.storage.set_calendar_format(5, "short")
         self.storage.set_binding(42, 8, "Иванова И.И.", "teacher")
         token = self.storage.calendar_subscription(42, 8, 5)["token"]
         self.service.run(self.now(10))
         content = self.service.feed(token, self.now(10)).decode().replace("\r\n ", "")
-        self.assertIn("SUMMARY:Иванова 101", content)
-        self.assertIn("SUMMARY:Иванова 201", content)
-        self.assertIn("Занятие: 1. Алгебра · 11 ИС", content)
+        self.assertIn("SUMMARY:Иванова\r\n", content)
+        self.assertIn("LOCATION:101\r\n", content)
+        self.assertIn("LOCATION:201\r\n", content)
+        self.assertNotIn("DESCRIPTION:", content)
         self.assertNotIn("SUMMARY:Петров", content)
+
+    def test_existing_short_subscriptions_refresh_once_without_changing_full(
+        self,
+    ) -> None:
+        short_token = self.storage.calendar_subscription(42, None, 5)["token"]
+        full_token = self.storage.calendar_subscription(42, None, 6)["token"]
+        self.service.run(self.now(10))
+        with self.storage.connect() as db:
+            db.executemany(
+                "INSERT INTO calendar_preferences VALUES (?, ?, ?, ?)",
+                [
+                    (5, "short", 3, "20260101T000000Z"),
+                    (6, "full", 2, "20260101T000000Z"),
+                ],
+            )
+            db.execute("PRAGMA user_version=0")
+        original_full = self.service.feed(full_token, self.now(10))
+        original_short = self.service.feed(short_token, self.now(10))
+        self.service.storage = Storage(self.config.data_dir)
+        short = self.service.feed(short_token, self.now(10))
+        self.assertIn(b"SEQUENCE:4\r\n", short)
+        self.assertNotEqual(short, original_short)
+        self.assertNotIn(b"DESCRIPTION:", short)
+        self.assertEqual(self.service.feed(full_token, self.now(10)), original_full)
+        self.assertEqual(
+            self.service.storage.calendar_subscription(42, None, 5)["token"],
+            short_token,
+        )
+        with self.service.storage.connect() as db:
+            stamp = db.execute(
+                "SELECT updated_at FROM calendar_preferences WHERE user_id=5"
+            ).fetchone()[0]
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertGreater(stamp, "20260101T000000Z")
+        self.service.storage = Storage(self.config.data_dir)
+        self.assertEqual(self.service.feed(short_token, self.now(10)), short)
+        self.assertEqual(self.service.feed(full_token, self.now(10)), original_full)
 
     def test_legacy_database_migration_keeps_urls_and_is_idempotent(self) -> None:
         directory = self.config.data_dir / "legacy"
@@ -390,6 +437,7 @@ class CalendarTests(unittest.TestCase):
         ):
             Storage(directory)
         with closing(sqlite3.connect(directory / "bot.sqlite3")) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 0)
             self.assertNotIn("user_id", Storage._columns(db, "calendar_subscriptions"))
             self.assertEqual(
                 db.execute("SELECT token FROM calendar_subscriptions").fetchone()[0],
@@ -709,9 +757,11 @@ class CalendarTests(unittest.TestCase):
         first, second = [
             self.service.feed(token, self.now(10)).decode() for token in tokens
         ]
-        self.assertIn("SUMMARY:Иванова 101", first)
+        self.assertIn("SUMMARY:Иванова\r\n", first)
+        self.assertNotIn("DESCRIPTION:", first)
         self.assertNotIn("Практика", first)
         self.assertIn("SUMMARY:3. Практика", second)
+        self.assertIn("DESCRIPTION:", second)
         self.assertNotIn("Алгебра", second)
         for user_id, group in ((5, "11 ИС"), (6, "12 ИС")):
             bot.handlers.handle_message(

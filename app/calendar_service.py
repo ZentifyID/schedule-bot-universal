@@ -104,8 +104,7 @@ def _short_title(event: dict[str, str], name: str, target_type: str) -> str:
         else (event["description"].partition("Преподаватель: ")[2].split("\n", 1)[0])
     )
     surnames = dict.fromkeys(person.split()[0] for person in teacher_names(teacher))
-    surname = "/".join(surnames) or "Пара"
-    return f"{surname} {event['location']}".strip()
+    return "/".join(surnames) or "Пара"
 
 
 def render_calendar(
@@ -131,9 +130,6 @@ def render_calendar(
             summary = (
                 _short_title(event, name, target_type) if short else event["summary"]
             )
-            description = event["description"]
-            if short:
-                description += f"\nЗанятие: {event['summary']}"
             stamp = max(day["updated_at"], updated_at)
             lines.extend(
                 [
@@ -145,7 +141,12 @@ def render_calendar(
                     "DTSTART:" + event["start"],
                     "DTEND:" + event["end"],
                     "SUMMARY:" + _text(summary),
-                    "DESCRIPTION:" + _text(description),
+                ]
+            )
+            if not short:
+                lines.append("DESCRIPTION:" + _text(event["description"]))
+            lines.extend(
+                [
                     "LOCATION:" + _text(event["location"]),
                     "STATUS:" + event["status"],
                     "END:VEVENT",

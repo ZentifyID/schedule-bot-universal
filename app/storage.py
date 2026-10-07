@@ -145,6 +145,17 @@ class Storage:
             """)
             db.execute("DROP TABLE old_sent_autoposts")
 
+        if db.execute("PRAGMA user_version").fetchone()[0] < 1:
+            # Existing short subscriptions must refresh after the title/description change.
+            db.execute(
+                """
+                UPDATE calendar_preferences SET revision=revision+1, updated_at=?
+                WHERE title_format='short'
+                """,
+                (dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),),
+            )
+            db.execute("PRAGMA user_version=1")
+
     @staticmethod
     def _columns(db: sqlite3.Connection, table: str) -> set[str]:
         return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
