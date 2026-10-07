@@ -15,6 +15,8 @@ COMMANDS = {
     "/week",
     "/autopost_on",
     "/autopost_off",
+    "/calendar",
+    "/calendar_off",
 }
 SCHEDULE_COMMANDS = {"/today", "/tomorrow", "/date", "/week"}
 

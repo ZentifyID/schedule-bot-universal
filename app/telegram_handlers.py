@@ -261,6 +261,8 @@ class TelegramHandlers:
                 "файла замен, даже если для выбранной группы или преподавателя замен нет. "
                 "Повторно — только при изменении итогового расписания.\n"
                 "/autopost_off — отключить автоотправку.\n"
+                "/calendar — ссылка календаря выбранной группы или преподавателя.\n"
+                "/calendar_off — отозвать все ссылки календарей этого чата/темы.\n"
                 "/help — эта справка.\n\n"
                 "Настройки действуют в текущем чате или теме. "
                 "Менять их может любой участник. Расписание обновляется автоматически.\n"
@@ -281,7 +283,52 @@ class TelegramHandlers:
         target_type = str(binding["target_type"])
 
         now = dt.datetime.now(self.timezone)
-        if command == "/today":
+        if command == "/calendar":
+            if not self.config.calendar_public_url:
+                self.sender.send_message(
+                    chat_id,
+                    "Календарь пока не настроен на сервере. Нужен CALENDAR_PUBLIC_URL с HTTPS.",
+                    thread_id,
+                )
+                return
+            subscription = self.storage.calendar_subscription(chat_id, thread_id)
+            if subscription is None:
+                self._send_setup(chat_id, thread_id)
+                return
+            name = str(subscription["target_name"])
+            label = (
+                "Преподаватель"
+                if subscription["target_type"] == "teacher"
+                else "Группа"
+            )
+            url = f"{self.config.calendar_public_url}/calendar/{subscription['token']}.ics"
+            self.sender.send_message(
+                chat_id,
+                f"<b>{label}: {html.escape(name)}</b>\n"
+                "В этом календаре только выбранная группа или преподаватель.\n"
+                f"Пары на завтра публикуются после {self.config.calendar_publish_time:%H:%M} "
+                f"({html.escape(self.config.timezone)}). Поздние замены обновляются автоматически.\n\n"
+                "iPhone: Календарь → Календари → Добавить календарь → "
+                "Добавить подписной календарь. Вставьте этот адрес:\n"
+                f"<code>{html.escape(url)}</code>\n\n"
+                "Google Calendar: в веб-версии Другие календари → Добавить по URL. "
+                "Используйте подписку, а не разовый импорт файла.\n"
+                "До первой публикации календарь может быть пустым. "
+                "Скорость обновления зависит от приложения.\n"
+                "Ссылка закреплена за этим выбором. После смены /setup запросите новую "
+                "через /calendar и удалите старую подписку в телефоне. "
+                "Ссылка даёт доступ к расписанию — передавайте её только намеренно.",
+                thread_id,
+            )
+        elif command == "/calendar_off":
+            self.storage.revoke_calendars(chat_id, thread_id)
+            self.sender.send_message(
+                chat_id,
+                "Ссылки календарей этого чата/темы отозваны. "
+                "Удалите подписки в календаре телефона. /calendar выдаст новую ссылку.",
+                thread_id,
+            )
+        elif command == "/today":
             self._send_date(
                 chat_id, thread_id, name, now.date(), target_type=target_type
             )

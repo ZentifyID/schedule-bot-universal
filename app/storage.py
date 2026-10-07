@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import secrets
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -54,6 +55,23 @@ class Storage:
                     fingerprint TEXT NOT NULL,
                     sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (chat_id, thread_id, target_type, target_name, target_date)
+                );
+                CREATE TABLE IF NOT EXISTS calendar_subscriptions (
+                    token TEXT PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    UNIQUE(chat_id, thread_id, target_type, target_name)
+                );
+                CREATE TABLE IF NOT EXISTS calendar_days (
+                    target_type TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    events TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(target_type, target_name, target_date)
                 );
                 """
             )
@@ -169,6 +187,111 @@ class Storage:
     def autopost_bindings(self) -> list[sqlite3.Row]:
         with self.connect() as db:
             return db.execute("SELECT * FROM bindings WHERE autopost=1").fetchall()
+
+    def calendar_subscription(
+        self, chat_id: int, thread_id: int | None
+    ) -> sqlite3.Row | None:
+        """Pin a URL to the selected target, never to a mutable chat binding."""
+        with self.connect() as db:
+            binding = db.execute(
+                "SELECT * FROM bindings WHERE chat_id=? AND thread_id=?",
+                (chat_id, thread_id or 0),
+            ).fetchone()
+            if binding is None:
+                return None
+            key = (
+                chat_id,
+                thread_id or 0,
+                binding["target_type"],
+                binding["target_name"],
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO calendar_subscriptions VALUES (?, ?, ?, ?, ?)",
+                (secrets.token_hex(24), *key),
+            )
+            return db.execute(
+                "SELECT * FROM calendar_subscriptions WHERE chat_id=? AND thread_id=? "
+                "AND target_type=? AND target_name=?",
+                key,
+            ).fetchone()
+
+    def revoke_calendars(self, chat_id: int, thread_id: int | None) -> None:
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM calendar_subscriptions WHERE chat_id=? AND thread_id=?",
+                (chat_id, thread_id or 0),
+            )
+
+    def calendar_targets(self) -> list[sqlite3.Row]:
+        with self.connect() as db:
+            return db.execute(
+                "SELECT DISTINCT target_type, target_name FROM calendar_subscriptions"
+            ).fetchall()
+
+    def save_calendar_day(
+        self,
+        target_type: str,
+        name: str,
+        date: dt.date,
+        events: list[dict[str, str]],
+        now: dt.datetime,
+    ) -> None:
+        key = (target_type, name, date.isoformat())
+        with self.connect() as db:
+            previous = db.execute(
+                "SELECT * FROM calendar_days WHERE target_type=? AND target_name=? "
+                "AND target_date=?",
+                key,
+            ).fetchone()
+            by_uid = {event["uid"]: event for event in events}
+            if previous:
+                for event in json.loads(previous["events"]):
+                    if event["uid"] not in by_uid:
+                        by_uid[event["uid"]] = {**event, "status": "CANCELLED"}
+            encoded = json.dumps(
+                sorted(by_uid.values(), key=lambda event: event["uid"]),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if previous and previous["events"] == encoded:
+                return
+            sequence = int(previous["sequence"]) + 1 if previous else 0
+            stamp = now.astimezone(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            db.execute(
+                "INSERT INTO calendar_days VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(target_type, target_name, target_date) DO UPDATE SET "
+                "events=excluded.events, sequence=excluded.sequence, "
+                "updated_at=excluded.updated_at",
+                (*key, encoded, sequence, stamp),
+            )
+
+    def calendar_feed_data(
+        self, token: str, first_date: dt.date, last_date: dt.date
+    ) -> tuple[sqlite3.Row, list[sqlite3.Row]] | None:
+        with self.connect() as db:
+            subscription = db.execute(
+                "SELECT * FROM calendar_subscriptions WHERE token=?", (token,)
+            ).fetchone()
+            if subscription is None:
+                return None
+            days = db.execute(
+                "SELECT * FROM calendar_days WHERE target_type=? AND target_name=? "
+                "AND target_date BETWEEN ? AND ? ORDER BY target_date",
+                (
+                    subscription["target_type"],
+                    subscription["target_name"],
+                    first_date.isoformat(),
+                    last_date.isoformat(),
+                ),
+            ).fetchall()
+            return subscription, days
+
+    def cleanup_calendar_days(self, first_date: dt.date) -> None:
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM calendar_days WHERE target_date < ?",
+                (first_date.isoformat(),),
+            )
 
     def autopost_fingerprint(
         self,

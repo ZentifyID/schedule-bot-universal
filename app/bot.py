@@ -13,6 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .autopost import AutopostService
+from .calendar_service import CalendarService
 from .command_guard import CommandGuard
 from .config import Config
 from .replacement_service import ReplacementRepository
@@ -84,6 +85,14 @@ class Bot:
             replacements=self.replacements,
             sender=self.sender,
             validate_semester=self._validate_semester_config,
+        )
+        self.calendar = CalendarService(
+            config,
+            self.storage,
+            self.schedules,
+            self.replacements,
+            self.timezone,
+            self._validate_semester_config,
         )
 
     def initialize(self) -> None:
@@ -231,6 +240,7 @@ class Bot:
             return
         self._closed = True
         logger.info("Stopping bot")
+        self.calendar.close()
         self.executor.shutdown(wait=True, cancel_futures=False)
         self.sender.close()
 
@@ -239,6 +249,7 @@ class Bot:
         logger.info("Bot started groups=%s", len(self.schedules.groups()))
         network_failures = 0
         try:
+            self.calendar.start()
             while True:
                 retry_delay = 0
                 try:
